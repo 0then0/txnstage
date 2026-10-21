@@ -265,9 +265,18 @@ test("large compact UI recording survives export, import and rerun", async ({
 		mimeType: "application/json",
 		buffer: Buffer.from(JSON.stringify(scenario)),
 	});
+	// Wait for the actual schedule response before checking its rendered outcome.
+	const replayResponse = page.waitForResponse(
+		(response) =>
+			new URL(response.url()).pathname === "/api/replay" &&
+			response.request().method() === "POST",
+	);
 	await page
 		.getByRole("button", { name: "Rerun in fresh DB", exact: true })
 		.click();
+	const replayed = await replayResponse;
+	expect(replayed.ok()).toBe(true);
+	await replayed.finished();
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
 	);
@@ -284,9 +293,17 @@ test("large compact UI recording survives export, import and rerun", async ({
 		mimeType: "application/json",
 		buffer: bytes,
 	});
+	const rerunResponse = page.waitForResponse(
+		(response) =>
+			new URL(response.url()).pathname === "/api/replay" &&
+			response.request().method() === "POST",
+	);
 	await page
 		.getByRole("button", { name: "Rerun in fresh DB", exact: true })
 		.click();
+	const reran = await rerunResponse;
+	expect(reran.ok()).toBe(true);
+	await reran.finished();
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
 	);
