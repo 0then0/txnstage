@@ -10,7 +10,7 @@ Each experiment has one owned TempDir and a file `experiment.db`. A short-lived 
 
 Commands and events are JSON Lines on child stdio. There are two independent logical channels: command/control input and observation output. A dedicated stdin reader thread remains available while the SQL thread executes. Execute commands go to a bounded single-slot queue; cancel commands bypass that queue and set an atomic reason plus rusqlite's thread-safe InterruptHandle. Cancellation shares the transport. A stalled reader can back up this pipe, so the coordinator bounds the entire cancel send/wait interval and can kill the worker through an independent supervisor channel. EOF on coordinator input terminates the worker, including when the parent dies abruptly.
 
-No coordinator mutex is held while SQLite executes. State locks only protect short updates and serialization. Per-worker input locks protect writes to a pipe, not execution. Other workers and HTTP requests remain available while one busy handler retries. Polling `/api/state` at 200 ms reads memory and filesystem sizes; it performs no SQL on experiment connections. The metadata connection is separate, in memory, and does not touch the experiment.
+No coordinator mutex is held while SQLite executes. State locks only protect short updates and serialization. Per-worker input locks protect writes to a pipe, not execution. Other workers and HTTP requests remain available while one busy handler retries. Polling `/api/state` at 200 ms reads memory and filesystem sizes; only one background refresh may be in flight, so slow responses do not accumulate; it performs no SQL on experiment connections. The metadata connection is separate, in memory, and does not touch the experiment.
 
 ## Statement and result lifecycle
 

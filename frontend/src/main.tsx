@@ -126,10 +126,17 @@ function App() {
 				}
 			})
 			.catch((e) => setError(String(e)));
+		let refreshing = false;
 		const timer = setInterval(() => {
-			refresh().catch((e) => {
-				if (active) setError(String(e));
-			});
+			if (refreshing) return;
+			refreshing = true;
+			refresh()
+				.catch((e) => {
+					if (active) setError(String(e));
+				})
+				.finally(() => {
+					refreshing = false;
+				});
 		}, 200);
 		return () => {
 			active = false;
