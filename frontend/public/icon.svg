@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><title
+  >TxnStage: independent connections on a shared timeline</title><rect
+    width="64"
+    height="64"
+    rx="13"
+    fill="#263d2c"
+  /><g fill="none" stroke="#e7eedc" stroke-width="3" stroke-linecap="round"><path
+      d="M14 18h36M14 32h36M14 46h36"
+    /><path d="M24 14v36M41 14v36" stroke="#91a57b" /></g><rect
+    x="18"
+    y="12"
+    width="12"
+    height="12"
+    rx="3"
+    fill="#df9269"
+  /><rect x="35" y="26" width="12" height="12" rx="3" fill="#cddbbb" /><rect
+    x="18"
+    y="40"
+    width="12"
+    height="12"
+    rx="3"
+    fill="#cddbbb"
+  /></svg>

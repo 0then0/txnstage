@@ -1,0 +1,53 @@
+# Architecture and boundaries
+
+The release is one Rust binary. Its public modes are `serve`, `run`, `scenarios`, and `version`; `--worker` is internal. React and CodeMirror assets are bundled by rust-embed at release build time. rusqlite's bundled feature builds the pinned SQLite C source, independently of the system SQLite.
+
+## Responsibilities
+
+`model.rs` defines bounded, versioned contracts and validates untrusted artifacts. `scenarios.rs` constructs six schedules covering four topics. `engine.rs` starts processes, enforces one in-flight operation per connection, serializes observations, runs event barriers, cancels operations and reaps children. `worker.rs` alone owns its experiment SQLite connection. `server.rs` exposes a loopback-only Axum API. `main.rs` connects CLI modes to the same engine. The frontend is a consumer of this API.
+
+Each experiment has one owned TempDir and a file `experiment.db`. A short-lived bootstrap connection sets the requested journal mode before workers exist. Initial schema and data then execute as visible `seed_*` operations on A, using exactly the same worker restrictions. Every worker disables autocheckpoint, uses in-memory temporary storage, disables trusted schema and extension loading, and installs the authorizer before accepting user SQL. Initialization must use individual statements; a failed seed aborts startup and reaps all workers.
+
+Commands and events are JSON Lines on child stdio. There are two independent logical channels: command/control input and observation output. A dedicated stdin reader thread remains available while the SQL thread executes. Execute commands go to a bounded single-slot queue; cancel commands bypass that queue and set an atomic reason plus rusqlite's thread-safe InterruptHandle. Cancellation shares the transport. A stalled reader can back up this pipe, so the coordinator bounds the entire cancel send/wait interval and can kill the worker through an independent supervisor channel. EOF on coordinator input terminates the worker, including when the parent dies abruptly.
+
+No coordinator mutex is held while SQLite executes. State locks only protect short updates and serialization. Per-worker input locks protect writes to a pipe, not execution. Other workers and HTTP requests remain available while one busy handler retries. Polling `/api/state` at 200 ms reads memory and filesystem sizes; it performs no SQL on experiment connections. The metadata connection is separate, in memory, and does not touch the experiment.
+
+## Statement and result lifecycle
+
+An operation has `created → running → completed / failed / cancelled / timed_out`. Its connection cannot accept another operation until it has a terminal observation. A failed SQLite statement does not imply rollback: actual transaction/autocommit state is sampled after finalization. Expected scenario errors remain failed SQL operations with primary and extended codes; expectation matching is a separate scheduler concern.
+
+SQL boundaries use SQLite's `sqlite3_complete` and `sqlite3_prepare_v3` tail, never string splitting. A preflight rejects executable tails with an authorizer denying all actions before preparing the first statement, because some PRAGMAs take effect during prepare. Trigger-body and quoted semicolons remain valid. Direct PRAGMA statements with bound parameters are denied by the authorizer during prepare, before settings can change; parameterized SELECTs over table-valued PRAGMAs remain supported. Comments and a trailing terminator are accepted. Leading empty statements before an executable statement are intentionally rejected by the preflight.
+
+Parameters are positional in SQLite's bind-index order. The number of provided cells must equal `sqlite3_bind_parameter_count`. Every statement is stepped through SQLITE_DONE and then finalized. The preview limit suppresses collection, not stepping. Rows/changes report strings for 64-bit counts; INTEGER cells are decimal strings. BLOB preview is hex and TEXT preview is UTF-8 with replacement for invalid byte sequences. Exact invalid-UTF-8 TEXT bytes are not preserved in v0.1; use BLOB for byte-level experiments. REAL infinities are serialized as `"Infinity"` and `"-Infinity"`, not JSON null. Input REAL parameters must be finite. SQLite itself maps NaN to NULL.
+
+## Busy policy and cancellation
+
+The custom handler counts every call. It emits the first callback and subsequent power-of-two counts to avoid event floods; the terminal event contains the exact final count. `busy` therefore means an observed SQLite callback, not guessed contention or a known lock owner. The elapsed operation clock is checked against `busy_ms`; retry sleeps are fixed 10 ms, and cancel is checked before and after each sleep. A zero budget still observes a callback if SQLite invokes it, then returns immediately.
+
+This policy is not the native `sqlite3_busy_timeout` implementation. SQLite may bypass a handler, including for an obsolete WAL snapshot. `PRAGMA busy_timeout=...` would replace instrumentation and is explicitly denied. `wal_autocheckpoint` and `journal_mode` assignments are also denied; change settings through a fresh experiment. Other allowed mutable PRAGMAs are foreign_keys, defer_foreign_keys, read_uncommitted and explicit wal_checkpoint. Query-only PRAGMAs are whitelisted in `worker.rs`; all other PRAGMAs are rejected.
+
+Cancellation uses both sqlite3_interrupt and a progress handler every 1000 VM instructions. The atomic reason also exits busy retry, where a VM progress callback may not run. The coordinator starts deadline monitoring before writing the execute command, samples deadlines at 25 ms and allows 300 ms for the entire cooperative cancel send/wait interval, including IPC backpressure. A still-active worker is killed, reaped, and marked `state_lost`; it cannot be reused until reset. Terminal data preserves the worker's reported outcome alongside a cancellation request, since cancellation can race statement completion. Cancellation does not promise to undo a commit that already happened.
+
+Stop and reset cancel active work, kill and reap every owned worker, and explicitly remove the owned directory. Directory cleanup does not depend on delayed watchdog Arc destruction. Ctrl+C performs the same cleanup. An uncatchable coordinator kill can leave a temporary directory; workers still terminate on stdin EOF. v0.1 never scans for or deletes another launch's directories. The browser tab closing leaves the CLI server alive.
+
+## Resources and local isolation
+
+The authorizer denies ATTACH/DETACH (including SQLite's VACUUM INTO attachment), extension/file functions, and non-whitelisted PRAGMAs. No user UDFs or shell commands are installed. SQLite temp storage is memory only; each worker has a 64 MiB SQLite heap hard limit, a 1 MiB SQLite value limit, 64 KiB SQL, 100 columns and no attached databases. `max_page_count=16384` at the fixed default 4096-byte page size limits the DB to about 64 MiB. A watchdog stops workers if observed DB+WAL size exceeds 128 MiB. This is a sampled resource guard, with possible overshoot, not an OS filesystem quota. Large Rust-side results are separately bounded.
+
+One result collects at most 200 rows and roughly 512 KiB before dropping subsequent previews, while still draining the statement. A final row can exceed that soft per-result byte budget by at most the column/cell preview limits. The event store has a 5 MiB soft budget; when necessary, result row previews are omitted with an explicit `recording_limit` marker. New submissions stop at that budget, at 512 KiB aggregate submitted operation descriptions (including initialization), 200 user operations, or the event count limit. Already-active terminal events are retained. Imported JSON is limited to 8 MiB; scenarios to 1 MiB. CLI and browser exports use compact JSON and check the actual serialized UTF-8 byte length against the same import limit.
+
+This is an application-level sandbox for the bundled SQLite API, not an OS security boundary for arbitrary native code. There is no path-opening HTTP endpoint. The internal worker CLI is not a public database-opening interface.
+
+The server accepts only its actual `127.0.0.1:port` Host and, if supplied, its matching HTTP Origin. Every `/api/*` request requires a random per-launch token. The token is not placed in query parameters or artifacts. No permissive CORS is enabled. CSP restricts scripts and network requests to the local origin. Resource bodies are bounded. Import validation parses data only; execution requires reset/replay/execute explicitly.
+
+## Observation and interpretation
+
+Sequence numbers are assigned as events reach the coordinator. Worker callback events are emitted before it resumes retrying, enabling an explicit barrier before a second connection releases contention. Cross-process timestamps, internal lock actions, exact retry counts and completion durations are not deterministic. Dependencies express only requested schedules and confirmed observations.
+
+Transaction state and autocommit are API facts sampled after completion, not continuously polled SQL facts. File sizes are filesystem samples, labeled with elapsed measurement time. WAL byte size is not a live frame count. Checkpoint frame counts are only the results of explicit user statements. No hidden checkpoint updates the dashboard; SQLite's own normal connection-close behavior still applies when workers are terminated.
+
+Facts: “busy callback observed”, “extended code 517”, “log 3, checkpointed 2”. Interpretations: “a reader probably prevented further checkpoint progress”. Do not infer lock ownership from SQLITE_BUSY. A PASSIVE checkpoint can return successfully while incomplete. See [isolation](https://www.sqlite.org/isolation.html), [WAL](https://www.sqlite.org/wal.html), [busy callbacks](https://www.sqlite.org/c3ref/busy_handler.html), [checkpoint modes](https://www.sqlite.org/c3ref/wal_checkpoint_v2.html) and [transaction modes](https://www.sqlite.org/lang_transaction.html).
+
+## Drafts and asynchronous replies
+
+Editing an already observed operation updates the executable draft. Recorded operations and events retain their original SQL and parameters, and the runbook labels differing observations as historical. Reset reruns the draft in a fresh database. UI actions capture an experiment generation; stale success, error and finally callbacks cannot replace current editors, notices, errors or pending state. State refreshes also reject responses older than the last applied request.

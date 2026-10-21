@@ -1,0 +1,94 @@
+{
+  "format_version": 1,
+  "name": "DEFERRED vs IMMEDIATE · deferred",
+  "description": "The same read-modify-write operation contends at promotion under DEFERRED. Compare with IMMEDIATE, where contention moves to BEGIN. Neither choice is universally better. https://www.sqlite.org/lang_transaction.html",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 3
+  },
+  "initial": [
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)",
+    "INSERT INTO t VALUES (1, 1)"
+  ],
+  "operations": [
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN DEFERRED",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "DEFERRED does not request write access yet."
+    },
+    {
+      "id": "a_read",
+      "connection": "A",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "Read before modifying."
+    },
+    {
+      "id": "b_write",
+      "connection": "B",
+      "sql": "UPDATE t SET v = v + 1 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_read",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Another business operation commits."
+    },
+    {
+      "id": "a_write",
+      "connection": "A",
+      "sql": "UPDATE t SET v = v + 1 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_write",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "extended": 517
+      },
+      "note": "Contention appears at snapshot promotion."
+    },
+    {
+      "id": "a_rollback",
+      "connection": "A",
+      "sql": "ROLLBACK",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_write",
+          "event": "failed"
+        }
+      ],
+      "expect": null,
+      "note": "Restart the whole transaction to retry."
+    }
+  ]
+}

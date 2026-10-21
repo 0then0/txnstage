@@ -1,0 +1,54 @@
+name: Build release binaries
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            binary: target/release/txnstage
+          - os: macos-latest
+            label: macos-arm64
+            binary: target/release/txnstage
+          - os: macos-15-intel
+            label: macos-x86_64
+            binary: target/release/txnstage
+          - os: windows-latest
+            label: windows-x86_64
+            binary: target/release/txnstage.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm --dir frontend install --frozen-lockfile
+      - run: pnpm --dir frontend check
+      - run: pnpm --dir frontend test
+      - run: pnpm --dir frontend build
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - run: pnpm --dir frontend exec playwright install --with-deps chromium
+      - run: pnpm --dir frontend e2e
+      - run: python scripts/package-release.py '${{ matrix.binary }}' '${{ matrix.label }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: txnstage-${{ matrix.label }}
+          path: dist/*
+          retention-days: 30

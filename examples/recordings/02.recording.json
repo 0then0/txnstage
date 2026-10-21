@@ -1,0 +1,627 @@
+{
+  "format_version": 1,
+  "scenario": {
+    "format_version": 1,
+    "name": "Two writers · retry",
+    "description": "SQLite allows one writer at a time. Dispatch B, wait for an observed busy callback, then commit A. This retry policy is instrumented, not sqlite3_busy_timeout. https://www.sqlite.org/c3ref/busy_handler.html",
+    "settings": {
+      "journal_mode": "wal",
+      "busy_ms": 2000,
+      "deadline_ms": 5000,
+      "row_limit": 100,
+      "connections": 3
+    },
+    "initial": [
+      "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)",
+      "INSERT INTO t VALUES (1, 1)"
+    ],
+    "operations": [
+      {
+        "id": "a_begin",
+        "connection": "A",
+        "sql": "BEGIN IMMEDIATE",
+        "params": [],
+        "after": [],
+        "expect": null,
+        "note": "A obtains write access."
+      },
+      {
+        "id": "a_write",
+        "connection": "A",
+        "sql": "UPDATE t SET v = 2 WHERE id = 1",
+        "params": [],
+        "after": [
+          {
+            "operation": "a_begin",
+            "event": "completed"
+          }
+        ],
+        "expect": null,
+        "note": "Keep A's transaction open."
+      },
+      {
+        "id": "b_write",
+        "connection": "B",
+        "sql": "UPDATE t SET v = 3 WHERE id = 1",
+        "params": [],
+        "after": [
+          {
+            "operation": "a_write",
+            "event": "completed"
+          }
+        ],
+        "expect": null,
+        "note": "Dispatch without waiting; B may retry."
+      },
+      {
+        "id": "a_commit",
+        "connection": "A",
+        "sql": "COMMIT",
+        "params": [],
+        "after": [
+          {
+            "operation": "a_write",
+            "event": "completed"
+          },
+          {
+            "operation": "b_write",
+            "event": "busy"
+          }
+        ],
+        "expect": null,
+        "note": "After a confirmed busy callback, release A so B can finish."
+      },
+      {
+        "id": "b_read",
+        "connection": "B",
+        "sql": "SELECT v FROM t WHERE id = 1",
+        "params": [],
+        "after": [
+          {
+            "operation": "b_write",
+            "event": "completed"
+          },
+          {
+            "operation": "a_commit",
+            "event": "completed"
+          }
+        ],
+        "expect": {
+          "rows": [
+            [
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          ]
+        },
+        "note": "B's write committed."
+      }
+    ]
+  },
+  "environment": {
+    "arch": "aarch64",
+    "busy_policy": "instrumented fixed 10ms retry; not sqlite3_busy_timeout",
+    "compile_options": [
+      "ATOMIC_INTRINSICS=1",
+      "COMPILER=clang-17.0.0",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_FOREIGN_KEYS",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "ENABLE_API_ARMOR",
+      "ENABLE_COLUMN_METADATA",
+      "ENABLE_DBSTAT_VTAB",
+      "ENABLE_FTS3",
+      "ENABLE_FTS3_PARENTHESIS",
+      "ENABLE_FTS5",
+      "ENABLE_LOAD_EXTENSION",
+      "ENABLE_MEMORY_MANAGEMENT",
+      "ENABLE_RTREE",
+      "ENABLE_STAT4",
+      "HAVE_ISNAN",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=8",
+      "MUTEX_PTHREADS",
+      "SOUNDEX",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=1",
+      "USE_URI"
+    ],
+    "os": "macos",
+    "settings": {
+      "busy_ms": 2000,
+      "connections": 3,
+      "deadline_ms": 5000,
+      "journal_mode": "wal",
+      "row_limit": 100
+    },
+    "sqlite_source_id": "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24",
+    "sqlite_version": "3.53.2",
+    "txnstage": "0.1.0"
+  },
+  "events": [
+    {
+      "seq": 1,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "",
+      "kind": "ready",
+      "data": {
+        "pid": 93081,
+        "settings": {
+          "busy_ms": 2000,
+          "connections": 3,
+          "deadline_ms": 5000,
+          "journal_mode": "wal",
+          "row_limit": 100
+        }
+      }
+    },
+    {
+      "seq": 2,
+      "elapsed_ms": 2,
+      "connection": "B",
+      "operation": "",
+      "kind": "ready",
+      "data": {
+        "pid": 93082,
+        "settings": {
+          "busy_ms": 2000,
+          "connections": 3,
+          "deadline_ms": 5000,
+          "journal_mode": "wal",
+          "row_limit": 100
+        }
+      }
+    },
+    {
+      "seq": 3,
+      "elapsed_ms": 2,
+      "connection": "C",
+      "operation": "",
+      "kind": "ready",
+      "data": {
+        "pid": 93083,
+        "settings": {
+          "busy_ms": 2000,
+          "connections": 3,
+          "deadline_ms": 5000,
+          "journal_mode": "wal",
+          "row_limit": 100
+        }
+      }
+    },
+    {
+      "seq": 4,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "seed_0",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)"
+      }
+    },
+    {
+      "seq": 5,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "seed_0",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)"
+      }
+    },
+    {
+      "seq": 6,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "seed_0",
+      "kind": "completed",
+      "data": {
+        "autocommit": true,
+        "busy_calls": 0,
+        "duration_ms": 0,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 2,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 8272
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "0",
+          "columns": [],
+          "row_count": "0",
+          "rows": [],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "none"
+      }
+    },
+    {
+      "seq": 7,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "seed_1",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "INSERT INTO t VALUES (1, 1)"
+      }
+    },
+    {
+      "seq": 8,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "seed_1",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "INSERT INTO t VALUES (1, 1)"
+      }
+    },
+    {
+      "seq": 9,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "seed_1",
+      "kind": "completed",
+      "data": {
+        "autocommit": true,
+        "busy_calls": 0,
+        "duration_ms": 0,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 2,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 12392
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "1",
+          "columns": [],
+          "row_count": "0",
+          "rows": [],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "none"
+      }
+    },
+    {
+      "seq": 10,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_begin",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "BEGIN IMMEDIATE"
+      }
+    },
+    {
+      "seq": 11,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_begin",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "BEGIN IMMEDIATE"
+      }
+    },
+    {
+      "seq": 12,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_begin",
+      "kind": "completed",
+      "data": {
+        "autocommit": false,
+        "busy_calls": 0,
+        "duration_ms": 0,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 2,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 12392
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "1",
+          "columns": [],
+          "row_count": "0",
+          "rows": [],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "write"
+      }
+    },
+    {
+      "seq": 13,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_write",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "UPDATE t SET v = 2 WHERE id = 1"
+      }
+    },
+    {
+      "seq": 14,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_write",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "UPDATE t SET v = 2 WHERE id = 1"
+      }
+    },
+    {
+      "seq": 15,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_write",
+      "kind": "completed",
+      "data": {
+        "autocommit": false,
+        "busy_calls": 0,
+        "duration_ms": 0,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 2,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 12392
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "1",
+          "columns": [],
+          "row_count": "0",
+          "rows": [],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "write"
+      }
+    },
+    {
+      "seq": 16,
+      "elapsed_ms": 2,
+      "connection": "B",
+      "operation": "b_write",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "UPDATE t SET v = 3 WHERE id = 1"
+      }
+    },
+    {
+      "seq": 17,
+      "elapsed_ms": 2,
+      "connection": "B",
+      "operation": "b_write",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "UPDATE t SET v = 3 WHERE id = 1"
+      }
+    },
+    {
+      "seq": 18,
+      "elapsed_ms": 2,
+      "connection": "B",
+      "operation": "b_write",
+      "kind": "busy",
+      "data": {
+        "calls": 1,
+        "observation": "SQLite invoked the instrumented busy handler"
+      }
+    },
+    {
+      "seq": 19,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_commit",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "COMMIT"
+      }
+    },
+    {
+      "seq": 20,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_commit",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "COMMIT"
+      }
+    },
+    {
+      "seq": 21,
+      "elapsed_ms": 2,
+      "connection": "A",
+      "operation": "a_commit",
+      "kind": "completed",
+      "data": {
+        "autocommit": true,
+        "busy_calls": 0,
+        "duration_ms": 0,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 2,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 16512
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "1",
+          "columns": [],
+          "row_count": "0",
+          "rows": [],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "none"
+      }
+    },
+    {
+      "seq": 22,
+      "elapsed_ms": 18,
+      "connection": "B",
+      "operation": "b_write",
+      "kind": "completed",
+      "data": {
+        "autocommit": true,
+        "busy_calls": 1,
+        "duration_ms": 15,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 18,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 20632
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "1",
+          "columns": [],
+          "row_count": "0",
+          "rows": [],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "none"
+      }
+    },
+    {
+      "seq": 23,
+      "elapsed_ms": 18,
+      "connection": "B",
+      "operation": "b_read",
+      "kind": "created",
+      "data": {
+        "params": [],
+        "sql": "SELECT v FROM t WHERE id = 1"
+      }
+    },
+    {
+      "seq": 24,
+      "elapsed_ms": 18,
+      "connection": "B",
+      "operation": "b_read",
+      "kind": "running",
+      "data": {
+        "params": [],
+        "sql": "SELECT v FROM t WHERE id = 1"
+      }
+    },
+    {
+      "seq": 25,
+      "elapsed_ms": 18,
+      "connection": "B",
+      "operation": "b_read",
+      "kind": "completed",
+      "data": {
+        "autocommit": true,
+        "busy_calls": 0,
+        "duration_ms": 0,
+        "files_at_completion": {
+          "db_bytes": 4096,
+          "elapsed_ms": 18,
+          "measurement": "filesystem stat only; no SQL or checkpoint",
+          "wal_bytes": 20632
+        },
+        "result": {
+          "cell_previews": false,
+          "changes": "1",
+          "columns": [
+            "v"
+          ],
+          "row_count": "1",
+          "rows": [
+            [
+              {
+                "type": "integer",
+                "value": "3"
+              }
+            ]
+          ],
+          "rows_truncated": false,
+          "statement": "drained and finalized"
+        },
+        "transaction": "none"
+      }
+    },
+    {
+      "seq": 26,
+      "elapsed_ms": 19,
+      "connection": "C",
+      "operation": "",
+      "kind": "worker_lost",
+      "data": {
+        "message": "Worker exited; connection state lost",
+        "state_lost": true
+      }
+    },
+    {
+      "seq": 27,
+      "elapsed_ms": 19,
+      "connection": "A",
+      "operation": "",
+      "kind": "worker_lost",
+      "data": {
+        "message": "Worker exited; connection state lost",
+        "state_lost": true
+      }
+    },
+    {
+      "seq": 28,
+      "elapsed_ms": 19,
+      "connection": "B",
+      "operation": "",
+      "kind": "worker_lost",
+      "data": {
+        "message": "Worker exited; connection state lost",
+        "state_lost": true
+      }
+    }
+  ]
+}

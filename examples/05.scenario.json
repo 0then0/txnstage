@@ -1,0 +1,147 @@
+{
+  "format_version": 1,
+  "name": "DEFERRED vs IMMEDIATE · immediate",
+  "description": "The same read-modify-write operation contends at promotion under DEFERRED. Compare with IMMEDIATE, where contention moves to BEGIN. Neither choice is universally better. https://www.sqlite.org/lang_transaction.html",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 3
+  },
+  "initial": [
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)",
+    "INSERT INTO t VALUES (1, 1)"
+  ],
+  "operations": [
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "Request write access before reading."
+    },
+    {
+      "id": "a_read",
+      "connection": "A",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "Same business operation and initial data."
+    },
+    {
+      "id": "b_begin",
+      "connection": "B",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_read",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Contention now appears at B's BEGIN."
+    },
+    {
+      "id": "a_write",
+      "connection": "A",
+      "sql": "UPDATE t SET v = v + 1 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_begin",
+          "event": "busy"
+        }
+      ],
+      "expect": null,
+      "note": "A can finish its read-modify-write."
+    },
+    {
+      "id": "a_commit",
+      "connection": "A",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_write",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Release write access."
+    },
+    {
+      "id": "b_read",
+      "connection": "B",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_begin",
+          "event": "completed"
+        },
+        {
+          "operation": "a_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            }
+          ]
+        ]
+      },
+      "note": "B reads the committed value."
+    },
+    {
+      "id": "b_write",
+      "connection": "B",
+      "sql": "UPDATE t SET v = v + 1 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_read",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "B performs the same increment."
+    },
+    {
+      "id": "b_commit",
+      "connection": "B",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_write",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Commit B."
+    }
+  ]
+}

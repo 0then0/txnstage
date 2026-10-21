@@ -1,0 +1,140 @@
+{
+  "format_version": 1,
+  "name": "Stale snapshot",
+  "description": "A read snapshot stays at V1 after B commits V2. Retrying cannot promote an obsolete snapshot; roll back and start again. Expected extended error 517. https://www.sqlite.org/isolation.html",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 3
+  },
+  "initial": [
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)",
+    "INSERT INTO t VALUES (1, 1)"
+  ],
+  "operations": [
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "Start a deferred transaction."
+    },
+    {
+      "id": "a_read",
+      "connection": "A",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "Pin A's snapshot at V1."
+    },
+    {
+      "id": "b_write",
+      "connection": "B",
+      "sql": "UPDATE t SET v = 2 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_read",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "B commits V2 in autocommit mode."
+    },
+    {
+      "id": "a_still",
+      "connection": "A",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_write",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "A still observes V1."
+    },
+    {
+      "id": "a_promote",
+      "connection": "A",
+      "sql": "UPDATE t SET v = 3 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_still",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "extended": 517
+      },
+      "note": "Expected SQLITE_BUSY_SNAPSHOT (517), even with a nonzero busy budget."
+    },
+    {
+      "id": "a_rollback",
+      "connection": "A",
+      "sql": "ROLLBACK",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_promote",
+          "event": "failed"
+        }
+      ],
+      "expect": null,
+      "note": "Discard the stale snapshot."
+    },
+    {
+      "id": "a_fresh",
+      "connection": "A",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_rollback",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            }
+          ]
+        ]
+      },
+      "note": "A fresh statement sees V2."
+    }
+  ]
+}

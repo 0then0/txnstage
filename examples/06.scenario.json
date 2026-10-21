@@ -1,0 +1,141 @@
+{
+  "format_version": 1,
+  "name": "Reader & checkpoint",
+  "description": "A reader can prevent a PASSIVE checkpoint from processing every WAL frame. Compare log and checkpointed counts, not just the busy flag or WAL size. Autocheckpoint is disabled on all workers. https://www.sqlite.org/c3ref/wal_checkpoint_v2.html",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 3
+  },
+  "initial": [
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)",
+    "INSERT INTO t VALUES (1, 1)"
+  ],
+  "operations": [
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "Hold a read transaction."
+    },
+    {
+      "id": "a_read",
+      "connection": "A",
+      "sql": "SELECT v FROM t WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "Pin a read snapshot."
+    },
+    {
+      "id": "b_write",
+      "connection": "B",
+      "sql": "UPDATE t SET v = 2 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_read",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Create frames newer than A's snapshot."
+    },
+    {
+      "id": "c_partial",
+      "connection": "C",
+      "sql": "PRAGMA wal_checkpoint(PASSIVE)",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_write",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "partial_checkpoint": true
+      },
+      "note": "Observe busy, log, checkpointed; success can still mean incomplete."
+    },
+    {
+      "id": "a_end",
+      "connection": "A",
+      "sql": "ROLLBACK",
+      "params": [],
+      "after": [
+        {
+          "operation": "c_partial",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Release the reader."
+    },
+    {
+      "id": "c_full",
+      "connection": "C",
+      "sql": "PRAGMA wal_checkpoint(PASSIVE)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_end",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "full_checkpoint": true
+      },
+      "note": "All frames can now be checkpointed."
+    },
+    {
+      "id": "c_truncate",
+      "connection": "C",
+      "sql": "PRAGMA wal_checkpoint(TRUNCATE)",
+      "params": [],
+      "after": [
+        {
+          "operation": "c_full",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Explicitly truncate the WAL."
+    }
+  ]
+}
