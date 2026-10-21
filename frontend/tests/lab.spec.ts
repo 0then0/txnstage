@@ -236,6 +236,8 @@ async function painted(page: Page) {
 test("large compact UI recording survives export, import and rerun", async ({
 	page,
 }) => {
+	// Two full replays and multi-MiB artifact I/O run under deliberate CPU throttling.
+	test.slow();
 	const cdp = await page.context().newCDPSession(page);
 	// Exercise the large result on a slower CPU without relaxing completion deadlines.
 	await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
