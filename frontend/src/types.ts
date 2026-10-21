@@ -61,6 +61,8 @@ export interface Recording {
 	events: Event[];
 }
 export interface Snapshot {
+	experiment: string;
+	event_offset: number;
 	scenario: Scenario;
 	environment: Record<string, unknown>;
 	events: Event[];

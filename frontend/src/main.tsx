@@ -4,6 +4,7 @@ import { artifactBlob, MAX_ARTIFACT } from "./artifact";
 import { EventDetail } from "./EventDetail";
 import { ResultTable } from "./ResultTable";
 import { SqlEditor } from "./SqlEditor";
+import { mergeSnapshot, statePath } from "./snapshot";
 import {
 	type Event,
 	type Operation,
@@ -76,19 +77,23 @@ function App() {
 	const file = useRef<HTMLInputElement>(null),
 		generation = useRef(0),
 		alive = useRef(true);
+	const latestSnapshot = useRef<Snapshot | null>(null);
 	const refreshSequence = useRef(0),
 		appliedRefresh = useRef(0);
 	const refresh = useCallback(async () => {
 		const gen = generation.current,
 			sequence = ++refreshSequence.current;
 		try {
-			const v = await api<Snapshot>("state");
+			const base = latestSnapshot.current;
+			const update = await api<Snapshot>(statePath(base));
+			const v = mergeSnapshot(base, update);
 			if (
 				alive.current &&
 				gen === generation.current &&
 				sequence > appliedRefresh.current
 			) {
 				appliedRefresh.current = sequence;
+				latestSnapshot.current = v;
 				setState(v);
 				return v;
 			}
@@ -117,6 +122,7 @@ function App() {
 		api<Snapshot>("state")
 			.then((v) => {
 				if (active) {
+					latestSnapshot.current = v;
 					setState(v);
 					setDraft(v.scenario);
 					const loaded = editorValues(v.scenario);

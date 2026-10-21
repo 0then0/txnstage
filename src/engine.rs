@@ -236,8 +236,17 @@ impl Engine {
         json!({"db_bytes":size("experiment.db"),"wal_bytes":size("experiment.db-wal"),"measurement":"filesystem stat only; no SQL or checkpoint","elapsed_ms":self.started.elapsed().as_millis() as u64})
     }
     pub async fn snapshot(&self) -> Value {
+        self.snapshot_since(None, 0).await
+    }
+    pub async fn snapshot_since(&self, experiment: Option<&str>, after: u64) -> Value {
         let s = self.state.lock().await;
-        json!({"scenario":self.scenario,"environment":self.environment,"events":s.events,"active":s.active,"lost":s.lost,"stopped":s.stopped,"operations":s.operations,"files":self.files()})
+        let id = self.directory.path().file_name().unwrap().to_string_lossy();
+        let offset = if experiment == Some(id.as_ref()) && after <= s.events.len() as u64 {
+            after as usize
+        } else {
+            0
+        };
+        json!({"experiment":id,"event_offset":offset,"scenario":self.scenario,"environment":self.environment,"events":&s.events[offset..],"active":s.active,"lost":s.lost,"stopped":s.stopped,"operations":s.operations,"files":self.files()})
     }
     pub async fn recording(&self) -> Recording {
         let s = self.state.lock().await;

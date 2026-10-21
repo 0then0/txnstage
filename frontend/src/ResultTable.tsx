@@ -1,9 +1,13 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { cellText, type Event } from "./types";
 
 const PAGE_SIZE = 20;
 
-export function ResultTable({ event }: { event: Event }) {
+export const ResultTable = memo(function ResultTable({
+	event,
+}: {
+	event: Event;
+}) {
 	const [page, setPage] = useState(0);
 	const result = event.data.result;
 	if (!result) return null;
@@ -64,4 +68,4 @@ export function ResultTable({ event }: { event: Event }) {
 			)}
 		</>
 	);
-}
+});

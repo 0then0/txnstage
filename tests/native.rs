@@ -615,3 +615,33 @@ async fn full_worker_pipe_does_not_block_deadline_cancel_or_stop() {
         assert!(!dir.exists());
     }
 }
+
+#[tokio::test]
+async fn incremental_snapshots_preserve_history_and_reset_cursors() {
+    let e = Engine::new(blank(), binary()).await.unwrap();
+    let first = e.snapshot().await;
+    let id = first["experiment"].as_str().unwrap();
+    let count = first["events"].as_array().unwrap().len() as u64;
+    let idle = e.snapshot_since(Some(id), count).await;
+    assert_eq!(idle["events"], json!([]));
+    exec(&e, "read", "A", "SELECT 42").await;
+    let delta = e.snapshot_since(Some(id), count).await;
+    let full = e.snapshot().await;
+    assert_eq!(delta["event_offset"], count);
+    assert_eq!(
+        delta["events"],
+        json!(&full["events"].as_array().unwrap()[count as usize..])
+    );
+    assert_eq!(delta["active"], full["active"]);
+    assert_eq!(
+        e.snapshot_since(Some(id), u64::MAX).await["event_offset"],
+        0
+    );
+    e.shutdown().await;
+    let fresh = Engine::new(blank(), binary()).await.unwrap();
+    let reset = fresh.snapshot_since(Some(id), count).await;
+    assert_ne!(reset["experiment"], first["experiment"]);
+    assert_eq!(reset["event_offset"], 0);
+    assert!(!reset["events"].as_array().unwrap().is_empty());
+    fresh.shutdown().await;
+}

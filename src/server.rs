@@ -1,7 +1,7 @@
 use crate::{engine::Engine, model::*, scenarios};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -51,9 +51,19 @@ async fn guard(State(app): State<App>, req: Request, next: Next) -> Response {
     h.insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".parse().unwrap());
     response
 }
-async fn state(State(app): State<App>) -> Json<Value> {
+#[derive(serde::Deserialize, Default)]
+struct StateCursor {
+    experiment: Option<String>,
+    #[serde(default)]
+    after: u64,
+}
+async fn state(State(app): State<App>, Query(cursor): Query<StateCursor>) -> Json<Value> {
     let engine = app.engine.read().await.clone();
-    Json(engine.snapshot().await)
+    Json(
+        engine
+            .snapshot_since(cursor.experiment.as_deref(), cursor.after)
+            .await,
+    )
 }
 async fn presets() -> Json<Vec<Scenario>> {
     Json(scenarios::builtins())

@@ -283,6 +283,15 @@ test("large compact UI recording survives export, import and rerun", async ({
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
 	);
+	const idleResponse = await page.waitForResponse((response) => {
+		const url = new URL(response.url());
+		return (
+			url.pathname === "/api/state" && url.searchParams.get("after") === "26"
+		);
+	});
+	const idleBody = await idleResponse.text();
+	expect(Buffer.byteLength(idleBody)).toBeLessThan(50_000);
+	expect(JSON.parse(idleBody).events).toEqual([]);
 	const table = page.getByRole("table", {
 		name: "Result for read_7",
 		exact: true,
@@ -504,7 +513,7 @@ test("out of order state response cannot restore pre-reset events", async ({
 	const ready = new Promise<void>((r) => {
 		captured = r;
 	});
-	await page.route("**/api/state", async (route) => {
+	await page.route("**/api/state*", async (route) => {
 		if (held) {
 			await route.continue();
 			return;
@@ -686,7 +695,7 @@ test("background polling does not overlap a pending state request", async ({
 	const ready = new Promise<void>((resolve) => {
 		captured = resolve;
 	});
-	await page.route("**/api/state", async (route) => {
+	await page.route("**/api/state*", async (route) => {
 		count++;
 		captured();
 		await gate;
