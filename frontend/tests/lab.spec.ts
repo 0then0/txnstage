@@ -236,6 +236,9 @@ async function painted(page: Page) {
 test("large compact UI recording survives export, import and rerun", async ({
 	page,
 }) => {
+	const cdp = await page.context().newCDPSession(page);
+	// Exercise the large result on a slower CPU without relaxing completion deadlines.
+	await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
 	await freshSnapshot(page);
 	const columns = Array.from({ length: 100 }, (_, i) => `x AS c${i}`).join(",");
 	const scenario = {
@@ -280,6 +283,23 @@ test("large compact UI recording survives export, import and rerun", async ({
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
 	);
+	const table = page.getByRole("table", {
+		name: "Result for read_7",
+		exact: true,
+	});
+	const pages = page.getByRole("navigation", {
+		name: "Result pages for read_7",
+	});
+	await expect(table.locator("tbody tr")).toHaveCount(20);
+	await expect(pages).toContainText(/Rows 1–20 of \d+/);
+	await pages.getByRole("button", { name: "Next rows" }).click();
+	await expect(pages).toContainText(/Rows 21–40 of \d+/);
+	await expect(
+		table.locator("tbody tr").first().locator("td").first(),
+	).toHaveText("integer21");
+	await pages.getByRole("button", { name: "Previous rows" }).click();
+	await expect(pages).toContainText(/Rows 1–20 of \d+/);
+	await pages.getByRole("button", { name: "Next rows" }).click();
 	const { bytes, value } = await exportJson(page, "Export run");
 	expect(bytes.length).toBeLessThanOrEqual(8 * 1024 * 1024);
 	expect(Buffer.byteLength(JSON.stringify(value, null, 2))).toBeGreaterThan(
@@ -307,6 +327,7 @@ test("large compact UI recording survives export, import and rerun", async ({
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
 	);
+	await expect(pages).toContainText(/Rows 1–20 of \d+/);
 });
 test("editing an observed step changes the draft and preserves recorded SQL", async ({
 	page,

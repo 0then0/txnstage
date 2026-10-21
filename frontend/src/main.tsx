@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { artifactBlob, MAX_ARTIFACT } from "./artifact";
 import { EventDetail } from "./EventDetail";
+import { ResultTable } from "./ResultTable";
 import { SqlEditor } from "./SqlEditor";
 import {
-	cellText,
 	type Event,
 	type Operation,
 	parseParams,
@@ -924,33 +924,10 @@ function App() {
 											</div>
 										) : last?.data.result ? (
 											<>
-												<div className="table-scroll">
-													<table aria-label={`Result for ${last.operation}`}>
-														<thead>
-															<tr>
-																{last.data.result.columns.map((name, i) => (
-																	<th scope="col" key={`${i}-${name}`}>
-																		{name}
-																	</th>
-																))}
-															</tr>
-														</thead>
-														<tbody>
-															{last.data.result.rows.map((row, i) => (
-																<tr key={`${last.seq}-${i}`}>
-																	{row.map((cell, j) => (
-																		<td key={`${last.seq}-${i}-${j}`}>
-																			<span className="type-tag">
-																				{cell.type}
-																			</span>
-																			{cellText(cell)}
-																		</td>
-																	))}
-																</tr>
-															))}
-														</tbody>
-													</table>
-												</div>
+												<ResultTable
+													key={`${generation.current}-${last.seq}`}
+													event={last}
+												/>
 												<p className="result-foot">
 													{last.data.result.row_count} rows ·{" "}
 													{last.data.busy_calls} busy callbacks

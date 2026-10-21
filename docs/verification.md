@@ -24,6 +24,8 @@ Vitest checks typed value presentation, observed dependency barriers, compact JS
 
 Playwright launches the release executable and drives Chromium through the full stack. It covers schedule execution, error 517, contention, cancellation, reset, artifact export/import/rerun, draft/history separation and stale asynchronous replies. UI checks also cover keyboard execution and inspection, event filtering, settings, read-only artifacts, long Cyrillic content and widths from 320 to 1440 CSS pixels.
 
+The large-recording test runs with Chromium CPU throttled by a factor of four and checks result pagination as well as export/import/rerun, without extending completion timeouts.
+
 Run all browser checks with:
 
 ```sh

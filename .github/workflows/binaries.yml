@@ -52,3 +52,14 @@ jobs:
           name: txnstage-${{ matrix.label }}
           path: dist/*
           retention-days: 30
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-reports-${{ matrix.label }}
+          path: |
+            .cache/reports/
+            frontend/playwright-report/
+            frontend/test-results/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

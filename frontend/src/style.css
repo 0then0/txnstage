@@ -551,6 +551,18 @@ td {
 	margin-right: 7px;
 	border-radius: 2px;
 }
+.result-pages {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-top: 8px;
+	font-size: 12px;
+}
+.result-pages button {
+	font-size: 12px;
+	padding: 6px 10px;
+}
 .result-foot {
 	font:
 		11px ui-monospace,
