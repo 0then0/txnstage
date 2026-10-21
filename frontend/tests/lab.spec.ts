@@ -651,3 +651,33 @@ test("responsive experiment selection, settings and long Cyrillic content", asyn
 		fullPage: true,
 	});
 });
+
+test("background polling does not overlap a pending state request", async ({
+	page,
+}) => {
+	await page.clock.install();
+	await freshSnapshot(page);
+	let count = 0;
+	let release!: () => void, captured!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const ready = new Promise<void>((resolve) => {
+		captured = resolve;
+	});
+	await page.route("**/api/state", async (route) => {
+		count++;
+		captured();
+		await gate;
+		await route.continue();
+	});
+	try {
+		await page.clock.runFor(250);
+		await ready;
+		await page.clock.runFor(1000);
+		expect(count).toBe(1);
+	} finally {
+		release();
+		await page.clock.resume();
+	}
+});
