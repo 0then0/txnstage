@@ -27,14 +27,14 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
       - uses: pnpm/action-setup@v6
         with:
           package_json_file: frontend/package.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - uses: dtolnay/rust-toolchain@stable
@@ -47,7 +47,7 @@ jobs:
       - run: pnpm --dir frontend exec playwright install --with-deps chromium
       - run: pnpm --dir frontend e2e
       - run: python scripts/package-release.py '${{ matrix.binary }}' '${{ matrix.label }}'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: txnstage-${{ matrix.label }}
           path: dist/*
