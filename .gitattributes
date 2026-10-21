@@ -1,0 +1,5 @@
+# Keep formatter and script input identical across Linux, macOS and Windows.
+* text=auto eol=lf
+
+# Preserve binary documentation assets without newline conversion.
+*.png binary
