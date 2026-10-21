@@ -87,7 +87,7 @@ Verify the checksum from the archive's directory:
 
 ```sh
 cd dist
-shasum -a 256 -c txnstage-0.1.0-macos-arm64.tar.gz.sha256
+shasum -a 256 -c txnstage-0.1.1-macos-arm64.tar.gz.sha256
 ```
 
 Use `sha256sum -c` on Linux or `Get-FileHash -Algorithm SHA256` on Windows. Test the archive on its target platform before distribution. macOS executables are unsigned; Linux compatibility depends on the build runner's libc. Code signing, notarization and automatic updates are not part of the current packaging workflow.

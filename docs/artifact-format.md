@@ -44,7 +44,7 @@ This schematic envelope shows the recording fields. Replace the abbreviated `sce
 {
   "format_version": 1,
   "scenario": {"...": "the executed scenario, not the current editor draft"},
-  "environment": {"sqlite_version":"...","sqlite_source_id":"...","compile_options":[],"os":"...","arch":"...","txnstage":"0.1.0","settings":{},"busy_policy":"..."},
+  "environment": {"sqlite_version":"...","sqlite_source_id":"...","compile_options":[],"os":"...","arch":"...","txnstage":"0.1.1","settings":{},"busy_policy":"..."},
   "events": [{"seq":1,"elapsed_ms":0,"connection":"A","operation":"","kind":"ready","data":{"pid":123}}]
 }
 ```
