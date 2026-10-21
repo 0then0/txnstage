@@ -711,3 +711,64 @@ test("background polling does not overlap a pending state request", async ({
 		await page.clock.resume();
 	}
 });
+
+test("replay completion waits for the pending poll before requesting final state", async ({
+	page,
+}) => {
+	await page.clock.install();
+	await freshSnapshot(page);
+	let releaseReplay!: () => void, replayCaptured!: () => void;
+	let releaseState!: () => void, stateCaptured!: () => void;
+	const replayGate = new Promise<void>((r) => {
+		releaseReplay = r;
+	});
+	const replayReady = new Promise<void>((r) => {
+		replayCaptured = r;
+	});
+	const stateGate = new Promise<void>((r) => {
+		releaseState = r;
+	});
+	const stateReady = new Promise<void>((r) => {
+		stateCaptured = r;
+	});
+	let count = 0;
+	await page.route("**/api/replay", async (route) => {
+		const response = await route.fetch();
+		replayCaptured();
+		await replayGate;
+		await route.fulfill({ response });
+	});
+	try {
+		await page
+			.getByRole("button", { name: "Run schedule", exact: true })
+			.click();
+		await replayReady;
+		await page.route("**/api/state*", async (route) => {
+			count++;
+			if (count === 1) {
+				const response = await route.fetch();
+				stateCaptured();
+				await stateGate;
+				await route.fulfill({ response });
+			} else await route.continue();
+		});
+		await page.clock.runFor(250);
+		await stateReady;
+		const response = page.waitForResponse(
+			(r) => new URL(r.url()).pathname === "/api/replay",
+		);
+		releaseReplay();
+		await (await response).finished();
+		await page.clock.runFor(1000);
+		// Drain browser promise callbacks after delivering the command response.
+		await page.evaluate(() => Promise.resolve());
+		expect(count).toBe(1);
+		releaseState();
+		await expect(page.getByRole("status")).toContainText(
+			"All declared expectations matched",
+		);
+	} finally {
+		releaseReplay();
+		releaseState();
+	}
+});

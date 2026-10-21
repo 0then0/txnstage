@@ -80,32 +80,48 @@ function App() {
 	const latestSnapshot = useRef<Snapshot | null>(null);
 	const refreshSequence = useRef(0),
 		appliedRefresh = useRef(0);
-	const refresh = useCallback(async () => {
-		const gen = generation.current,
-			sequence = ++refreshSequence.current;
-		try {
-			const base = latestSnapshot.current;
-			const update = await api<Snapshot>(statePath(base));
-			const v = mergeSnapshot(base, update);
-			if (
-				alive.current &&
-				gen === generation.current &&
-				sequence > appliedRefresh.current
-			) {
-				appliedRefresh.current = sequence;
-				latestSnapshot.current = v;
-				setState(v);
-				return v;
-			}
-		} catch (error) {
-			if (
-				alive.current &&
-				gen === generation.current &&
-				sequence > appliedRefresh.current
-			)
-				throw error;
-		}
-		return null;
+	const refreshQueue = useRef<{
+		gen: number;
+		done: Promise<Snapshot | null>;
+	} | null>(null);
+	const refresh = useCallback(() => {
+		const gen = generation.current;
+		// A new experiment must not wait for a stale request from the previous one.
+		const previous =
+			refreshQueue.current?.gen === gen
+				? refreshQueue.current.done
+				: Promise.resolve();
+		const done = previous
+			.catch(() => null)
+			.then(async () => {
+				if (!alive.current || gen !== generation.current) return null;
+				const sequence = ++refreshSequence.current;
+				try {
+					const base = latestSnapshot.current;
+					const update = await api<Snapshot>(statePath(base));
+					const v = mergeSnapshot(base, update);
+					if (
+						alive.current &&
+						gen === generation.current &&
+						sequence > appliedRefresh.current
+					) {
+						appliedRefresh.current = sequence;
+						latestSnapshot.current = v;
+						setState(v);
+						return v;
+					}
+				} catch (error) {
+					if (
+						alive.current &&
+						gen === generation.current &&
+						sequence > appliedRefresh.current
+					)
+						throw error;
+				}
+				return null;
+			});
+		refreshQueue.current = { gen, done };
+		return done;
 	}, []);
 	function current(gen: number) {
 		return alive.current && gen === generation.current;
