@@ -182,16 +182,25 @@ async fn cancel_long_sql_and_busy_retry() {
 #[tokio::test]
 async fn deadlines_worker_crash_and_cleanup() {
     let mut s = blank();
+    // Startup DDL is unrelated to the short operation deadline under test.
+    s.initial.clear();
     s.settings.deadline_ms = 150;
     s.settings.busy_ms = 10000;
     let e = Engine::new(s, binary()).await.unwrap();
     let dir = e.directory.path().to_path_buf();
     e.submit(operation("deadline", "A", LONG)).await.unwrap();
     assert_eq!(e.wait_terminal("deadline").await.unwrap().kind, "timed_out");
-    exec(&e, "hold", "A", "BEGIN IMMEDIATE").await;
-    e.submit(operation("busy_deadline", "B", "UPDATE t SET v=3"))
-        .await
-        .unwrap();
+    assert_eq!(
+        exec(&e, "hold", "A", "BEGIN IMMEDIATE").await.kind,
+        "completed"
+    );
+    e.submit(operation(
+        "busy_deadline",
+        "B",
+        "CREATE TABLE deadline_probe(v)",
+    ))
+    .await
+    .unwrap();
     e.wait_event("busy_deadline", None, "busy", 2000)
         .await
         .unwrap();
@@ -550,6 +559,8 @@ async fn checkpoint_expectations_reject_missing_invalid_and_unavailable_counts()
 async fn full_worker_pipe_does_not_block_deadline_cancel_or_stop() {
     for mode in ["deadline", "cancel", "stop"] {
         let mut scenario = blank();
+        // This test exercises worker I/O, not database initialization.
+        scenario.initial.clear();
         scenario.settings.deadline_ms = if mode == "deadline" { 100 } else { 5000 };
         let e = Engine::new(scenario, binary()).await.unwrap();
         let dir = e.directory.path().to_path_buf();
