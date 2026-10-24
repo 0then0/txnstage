@@ -3,7 +3,7 @@ name = "txnstage"
 version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
-description = "A local, process-isolated laboratory for real SQLite concurrency experiments"
+description = "A local visual laboratory for SQLite transactions, concurrency and data preservation"
 repository = "https://github.com/0then0/txnstage"
 readme = "README.md"
 

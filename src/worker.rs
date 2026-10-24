@@ -107,6 +107,7 @@ unsafe extern "C" fn authorize(
             "index_info",
             "index_list",
             "foreign_key_list",
+            "foreign_key_check",
             "schema_version",
             "user_version",
             "integrity_check",

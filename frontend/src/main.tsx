@@ -52,7 +52,7 @@ function editorValues(s: Scenario, used: string[] = []) {
 		const o = s.operations.find(
 			(o) => o.connection === c && !used.includes(o.id),
 		);
-		text[c] = o?.sql ?? "SELECT v FROM t WHERE id = 1";
+		text[c] = o?.sql ?? "SELECT 1";
 		ps[c] = JSON.stringify(o?.params ?? []);
 		selectedIds[c] = o?.id ?? "";
 	}
@@ -377,9 +377,12 @@ function App() {
 			<header className="topbar">
 				<a className="brand" href="/">
 					<img src="/icon.svg" width="32" height="32" alt="" />
-					TxnStage <span>v0.1</span>
+					TxnStage
+					{typeof state.environment.txnstage === "string" && (
+						<span>v{state.environment.txnstage}</span>
+					)}
 				</a>
-				<div className="top-subtitle">SQLITE CONCURRENCY LAB</div>
+				<div className="top-subtitle">SQLITE TRANSACTION LAB</div>
 				<div className="local">
 					<i />
 					LOCAL · DISPOSABLE
@@ -446,7 +449,9 @@ function App() {
 												? "Writer contention"
 												: i < 5
 													? "Transaction scheduling"
-													: "WAL maintenance"}
+													: i === 5
+														? "WAL maintenance"
+														: "FK cascade & data preservation"}
 									</small>
 								</span>
 								<span className="arrow">↗</span>
@@ -567,8 +572,8 @@ function App() {
 					)}
 					{dirty && (
 						<div className="banner historical">
-							Draft changed. Earlier observations belong to the SQL and settings
-							in event details. Apply settings with Reset or Rerun.
+							Experiment edited. Recorded observations keep their original SQL
+							and parameters. Apply settings with Reset or Run schedule.
 						</div>
 					)}
 					<section className="control-strip" aria-label="Experiment controls">

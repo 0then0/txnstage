@@ -40,6 +40,209 @@ async function observed(page: Page, id: string, kind: string) {
 			}),
 	).toHaveCount(1);
 }
+
+async function result(page: Page, id: string) {
+	await page
+		.locator(".event")
+		.filter({ has: page.locator("code", { hasText: new RegExp(`^${id}$`) }) })
+		.filter({ has: page.locator(".event-kind", { hasText: /^completed$/ }) })
+		.click();
+	return page.locator(".event-detail").getByRole("table", {
+		name: `Result for ${id}`,
+		exact: true,
+	});
+}
+
+for (const [file, name, preserved] of [
+	["07", "FK rebuild · cascade loss", false],
+	["08", "FK rebuild · OFF inside BEGIN", false],
+	["09", "FK rebuild · OFF before BEGIN", true],
+	["10", "FK rebuild · deferred checks", false],
+	["11", "FK rebuild · WAL observer", false],
+	["12", "FK rebuild · preserve children", true],
+] as const) {
+	test(`FK lab ${file}: catalog, recording import and fresh replay`, async ({
+		page,
+	}) => {
+		await open(page);
+		await choose(page, name);
+		await expect(page.locator(".scenario-list")).toContainText(
+			"FK cascade & data preservation",
+		);
+		const sqlRequests: string[] = [];
+		page.on("request", (request) => {
+			if (/\/api\/(execute|reset|replay)$/.test(request.url()))
+				sqlRequests.push(request.url());
+		});
+		await page
+			.locator("input[type=file]")
+			.setInputFiles(`../examples/recordings/${file}.recording.json`);
+		await expect(
+			page.getByText("Historical recording · read only"),
+		).toBeVisible();
+		await expect(
+			page.getByRole("button", { name: "Run A", exact: true }),
+		).toBeDisabled();
+		expect(sqlRequests).toEqual([]);
+		await page
+			.getByRole("button", { name: "Rerun in fresh DB", exact: true })
+			.click();
+		await expect(page.getByRole("status")).toContainText(
+			"All declared expectations matched",
+		);
+		const before = await result(page, "a_before_drop");
+		await expect(before.locator("tbody tr")).toHaveCount(5);
+		await expect(before).toContainText("9007199254740993");
+		await expect(before).toContainText("9223372036854775807");
+		const dropped = await result(page, "a_after_drop");
+		await expect(dropped.locator("tbody tr")).toHaveCount(
+			file === "09" ? 5 : 2,
+		);
+		if (file === "11") {
+			const stale = await result(page, "b_stale");
+			await expect(stale.locator("tbody tr")).toHaveCount(5);
+		}
+		const fresh = await result(page, "b_after_commit");
+		await expect(fresh.locator("tbody tr")).toHaveCount(preserved ? 5 : 2);
+		await expect(fresh).toContainText("north");
+		if (preserved) {
+			await expect(fresh).toContainText("alpha");
+			await expect(fresh).toContainText("9223372036854775807");
+			await expect(fresh).toContainText("blob");
+			await expect(fresh).toContainText("real");
+		}
+		await expect(await result(page, "b_integrity")).toContainText("ok");
+		await expect(
+			(await result(page, "b_fk_check")).locator("tbody tr"),
+		).toHaveCount(0);
+		await expect(await result(page, "a_fk_effective")).toContainText(
+			file === "09" ? "0" : "1",
+		);
+		await expect(await result(page, "a_defer_effective")).toContainText(
+			file === "10" ? "1" : "0",
+		);
+		if (file === "11") {
+			await result(page, "b_stale");
+			await page.screenshot({
+				path: "../.cache/reports/fk-lab-desktop.png",
+				fullPage: true,
+			});
+			await page.setViewportSize({ width: 390, height: 844 });
+			await expect(page.getByLabel("Experiment", { exact: true })).toHaveValue(
+				name,
+			);
+			expect(
+				await page.evaluate(
+					() => document.documentElement.scrollWidth <= innerWidth,
+				),
+			).toBe(true);
+		}
+		for (const connection of ["A", "B"]) {
+			await expect(
+				page.getByRole("textbox", {
+					name: `SQL connection ${connection}`,
+					exact: true,
+				}),
+			).toHaveText("SELECT 1");
+			await page
+				.getByRole("button", { name: `Run ${connection}`, exact: true })
+				.click();
+			const card = page.getByRole("article", {
+				name: `Connection ${connection}`,
+				exact: true,
+			});
+			const custom = card.getByRole("table", { name: /^Result for manual_/ });
+			await expect(custom.locator("tbody tr")).toHaveCount(1);
+			await expect(custom.locator(".type-tag")).toHaveText("integer");
+			await expect(custom.getByRole("cell")).toContainText("1");
+			await expect(card.locator(".sql-error")).toHaveCount(0);
+		}
+	});
+}
+
+test("empty imported scenarios offer executable custom SQL and show the running version", async ({
+	page,
+}) => {
+	await open(page);
+	const metadata = JSON.parse(await readFile("./package.json", "utf8"));
+	await expect(page.locator(".brand")).toContainText(`v${metadata.version}`);
+	await page.locator("input[type=file]").setInputFiles({
+		name: "empty.scenario.json",
+		mimeType: "application/json",
+		buffer: Buffer.from(
+			JSON.stringify({
+				format_version: 1,
+				name: "Empty database",
+				description: "Start with an empty database and run custom SQL.",
+				settings: {
+					journal_mode: "wal",
+					busy_ms: 2000,
+					deadline_ms: 5000,
+					row_limit: 100,
+					connections: 2,
+				},
+				initial: [],
+				operations: [],
+			}),
+		),
+	});
+	await expect(
+		page.getByRole("heading", { name: "Empty database", exact: true }),
+	).toBeVisible();
+	// An imported scenario has no environment metadata of its own.
+	await expect(page.locator(".brand")).toContainText(`v${metadata.version}`);
+	await page
+		.getByRole("button", { name: "Rerun in fresh DB", exact: true })
+		.click();
+	await expect(page.getByRole("status")).toContainText(
+		"All declared expectations matched",
+	);
+	await expect(
+		page.getByRole("textbox", { name: "SQL connection A", exact: true }),
+	).toHaveText("SELECT 1");
+	await page.getByRole("button", { name: "Run A", exact: true }).click();
+	const card = page.getByRole("article", { name: "Connection A", exact: true });
+	await expect(card.getByRole("table").locator("tbody tr")).toHaveCount(1);
+	await expect(card.locator(".sql-error")).toHaveCount(0);
+});
+
+test("FK preservation assertion fails for loss and passes for the restoration control", async ({
+	page,
+}) => {
+	await open(page);
+	await page
+		.locator("input[type=file]")
+		.setInputFiles(
+			"../examples/recordings/fk-preservation-fails.recording.json",
+		);
+	await expect(
+		page.getByText("Historical recording · read only"),
+	).toBeVisible();
+	await page
+		.getByRole("button", { name: "Rerun in fresh DB", exact: true })
+		.click();
+	await expect(page.getByRole("alert")).toContainText(
+		"Row expectation mismatch for b_preservation",
+	);
+	await observed(page, "a_commit", "completed");
+	await observed(page, "b_after_commit", "completed");
+	await expect(
+		page.locator(".event-kind").filter({ hasText: /^failed$/ }),
+	).toHaveCount(0);
+	await expect(page.getByRole("status")).toHaveCount(0);
+	await expect(
+		(await result(page, "b_after_commit")).locator("tbody tr"),
+	).toHaveCount(2);
+	await choose(page, "FK rebuild · preserve children");
+	await page.getByRole("button", { name: "Run schedule", exact: true }).click();
+	await expect(page.getByRole("status")).toContainText(
+		"All declared expectations matched",
+	);
+	await expect(
+		(await result(page, "b_after_commit")).locator("tbody tr"),
+	).toHaveCount(5);
+});
+
 test.describe("Documentation screenshot", () => {
 	test.use({ deviceScaleFactor: 2 });
 	test("snapshot through real UI and processes, typed result and expected 517", async ({

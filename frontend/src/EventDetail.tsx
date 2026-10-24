@@ -1,3 +1,4 @@
+import { ResultTable } from "./ResultTable";
 import type { Event } from "./types";
 
 export function EventDetail({
@@ -78,6 +79,16 @@ export function EventDetail({
 						),
 				)}
 			</dl>
+			{event.data.result && event.data.result.columns.length > 0 && (
+				<div className="detail-result">
+					<ResultTable key={event.seq} event={event} />
+					<p className="result-foot">
+						{event.data.result.row_count} rows
+						{event.data.result.rows_truncated ? " · row preview limited" : ""}
+						{event.data.result.cell_previews ? " · cell previews limited" : ""}
+					</p>
+				</div>
+			)}
 			<details className="raw-event">
 				<summary>Raw event JSON</summary>
 				<pre>{JSON.stringify(event.data, null, 2)}</pre>

@@ -1,5 +1,6 @@
 use crate::model::*;
 use serde_json::{Value, json};
+mod fk_rebuild;
 fn op(
     id: &str,
     c: &str,
@@ -154,11 +155,18 @@ pub fn builtins() -> Vec<Scenario> {
     ];
     let mut zero = writers.clone();
     zero.name = "Two writers · no wait".into();
+    zero.description = "With a zero retry budget, B's write returns SQLITE_BUSY (5) while A holds the writer slot. A then commits; a fresh read sees A's value. Compare with the retry experiment. https://www.sqlite.org/c3ref/busy_handler.html".into();
     zero.settings.busy_ms = 0;
     zero.operations[2].expect = json!({"extended":5});
+    zero.operations[2].note =
+        "B cannot write while A holds the writer slot; expect SQLITE_BUSY (5) without retrying."
+            .into();
     zero.operations[3].after = vec![dep("b_write", "failed")];
+    zero.operations[3].note = "After B's write fails, commit A's transaction.".into();
     zero.operations[4].after = done("a_commit");
     zero.operations[4].expect = rows(2);
+    zero.operations[4].note =
+        "Read A's committed value. B's failed write did not change it.".into();
     let mut deferred = base(
         "DEFERRED vs IMMEDIATE · deferred",
         "The same read-modify-write operation contends at promotion under DEFERRED. Compare with IMMEDIATE, where contention moves to BEGIN. Neither choice is universally better. https://www.sqlite.org/lang_transaction.html",
@@ -334,5 +342,7 @@ pub fn builtins() -> Vec<Scenario> {
             "Explicitly truncate the WAL.",
         ),
     ];
-    vec![snapshot, writers, zero, deferred, immediate, checkpoint]
+    let mut scenarios = vec![snapshot, writers, zero, deferred, immediate, checkpoint];
+    scenarios.extend(fk_rebuild::builtins());
+    scenarios
 }

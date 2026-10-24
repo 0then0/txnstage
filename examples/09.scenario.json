@@ -1,0 +1,1165 @@
+{
+  "format_version": 1,
+  "name": "FK rebuild · OFF before BEGIN",
+  "description": "Disable foreign_keys on A before BEGIN and verify that B remains independently enabled. All records survive the rebuild. After COMMIT, re-enable enforcement and check the complete records and their links. This control uses local SQLite transaction boundaries unavailable in D1 migrations.",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 2
+  },
+  "initial": [
+    "CREATE TABLE parent(id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+    "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id) ON DELETE CASCADE, label TEXT NOT NULL, amount INTEGER NOT NULL, weight REAL NOT NULL, payload BLOB, memo TEXT)",
+    "INSERT INTO parent VALUES(9007199254740993, 'north'), (9007199254740995, 'south')",
+    "INSERT INTO child VALUES(101, 9007199254740993, 'alpha', 9223372036854775807, 1.25, X'00ff', NULL), (102, 9007199254740993, 'beta', -7, 2.5, X'', ''), (103, 9007199254740995, 'gamma', 0, -0.5, NULL, 'kept')"
+  ],
+  "operations": [
+    {
+      "id": "a_fk_on",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys=ON",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "Set enforcement explicitly on migration connection A before BEGIN."
+    },
+    {
+      "id": "a_fk_enabled",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_on",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "Confirm that FK enforcement is enabled on migration connection A."
+    },
+    {
+      "id": "a_fk_schema",
+      "connection": "A",
+      "sql": "PRAGMA foreign_key_list(child)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_enabled",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "text",
+              "value": "parent_id"
+            },
+            {
+              "type": "text",
+              "value": "id"
+            },
+            {
+              "type": "text",
+              "value": "NO ACTION"
+            },
+            {
+              "type": "text",
+              "value": "CASCADE"
+            },
+            {
+              "type": "text",
+              "value": "NONE"
+            }
+          ]
+        ]
+      },
+      "note": "Verify the actual child -> parent ON DELETE CASCADE definition."
+    },
+    {
+      "id": "b_fk_on",
+      "connection": "B",
+      "sql": "PRAGMA foreign_keys=ON",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_schema",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "B's independent setting cannot configure A."
+    },
+    {
+      "id": "a_fk_off",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys=OFF",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_fk_on",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Disable enforcement on A before BEGIN. This control uses local SQLite transaction boundaries."
+    },
+    {
+      "id": "b_fk_enabled",
+      "connection": "B",
+      "sql": "PRAGMA foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_off",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "B remains enabled while A is disabled."
+    },
+    {
+      "id": "a_fk_disabled",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_fk_enabled",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Confirm OFF on the connection that will execute DROP."
+    },
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_disabled",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "All rebuild operations run in one transaction on A."
+    },
+    {
+      "id": "a_fk_effective",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Assert the effective enforcement setting inside the migration transaction on A."
+    },
+    {
+      "id": "a_defer_effective",
+      "connection": "A",
+      "sql": "PRAGMA defer_foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_effective",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Read the actual deferral setting on A before rebuilding."
+    },
+    {
+      "id": "a_create",
+      "connection": "A",
+      "sql": "CREATE TABLE replacement(id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_defer_effective",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Create the replacement parent with the same schema."
+    },
+    {
+      "id": "a_copy",
+      "connection": "A",
+      "sql": "INSERT INTO replacement(id, label) SELECT id, label FROM parent",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_create",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Copy parent IDs and values; child records have not been changed yet."
+    },
+    {
+      "id": "a_copy_check",
+      "connection": "A",
+      "sql": "SELECT 'parent' AS entity, id, NULL AS parent_id, label, NULL AS amount, NULL AS weight, NULL AS payload, NULL AS memo FROM replacement UNION ALL SELECT 'child', id, parent_id, label, amount, weight, payload, memo FROM child ORDER BY entity DESC, id",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_copy",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "north"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "south"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "101"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "alpha"
+            },
+            {
+              "type": "integer",
+              "value": "9223372036854775807"
+            },
+            {
+              "type": "real",
+              "value": 1.25
+            },
+            {
+              "type": "blob",
+              "value": "00ff"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "102"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "beta"
+            },
+            {
+              "type": "integer",
+              "value": "-7"
+            },
+            {
+              "type": "real",
+              "value": 2.5
+            },
+            {
+              "type": "blob",
+              "value": ""
+            },
+            {
+              "type": "text",
+              "value": ""
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "103"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "text",
+              "value": "gamma"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "real",
+              "value": -0.5
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "kept"
+            }
+          ]
+        ]
+      },
+      "note": "The replacement contains every parent record before DROP."
+    },
+    {
+      "id": "a_before_drop",
+      "connection": "A",
+      "sql": "SELECT 'parent' AS entity, id, NULL AS parent_id, label, NULL AS amount, NULL AS weight, NULL AS payload, NULL AS memo FROM parent UNION ALL SELECT 'child', id, parent_id, label, amount, weight, payload, memo FROM child ORDER BY entity DESC, id",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_copy_check",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "north"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "south"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "101"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "alpha"
+            },
+            {
+              "type": "integer",
+              "value": "9223372036854775807"
+            },
+            {
+              "type": "real",
+              "value": 1.25
+            },
+            {
+              "type": "blob",
+              "value": "00ff"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "102"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "beta"
+            },
+            {
+              "type": "integer",
+              "value": "-7"
+            },
+            {
+              "type": "real",
+              "value": 2.5
+            },
+            {
+              "type": "blob",
+              "value": ""
+            },
+            {
+              "type": "text",
+              "value": ""
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "103"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "text",
+              "value": "gamma"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "real",
+              "value": -0.5
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "kept"
+            }
+          ]
+        ]
+      },
+      "note": "Before DROP: two original parents and three complete child records."
+    },
+    {
+      "id": "a_drop",
+      "connection": "A",
+      "sql": "DROP TABLE parent",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_before_drop",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "With FK enforcement ON, DROP performs an implicit DELETE and cascades immediately."
+    },
+    {
+      "id": "a_after_drop",
+      "connection": "A",
+      "sql": "SELECT 'parent' AS entity, id, NULL AS parent_id, label, NULL AS amount, NULL AS weight, NULL AS payload, NULL AS memo FROM replacement UNION ALL SELECT 'child', id, parent_id, label, amount, weight, payload, memo FROM child ORDER BY entity DESC, id",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_drop",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "north"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "south"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "101"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "alpha"
+            },
+            {
+              "type": "integer",
+              "value": "9223372036854775807"
+            },
+            {
+              "type": "real",
+              "value": 1.25
+            },
+            {
+              "type": "blob",
+              "value": "00ff"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "102"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "beta"
+            },
+            {
+              "type": "integer",
+              "value": "-7"
+            },
+            {
+              "type": "real",
+              "value": 2.5
+            },
+            {
+              "type": "blob",
+              "value": ""
+            },
+            {
+              "type": "text",
+              "value": ""
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "103"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "text",
+              "value": "gamma"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "real",
+              "value": -0.5
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "kept"
+            }
+          ]
+        ]
+      },
+      "note": "Read replacement and child after DROP. With enforcement ON, only the copied parents remain. With enforcement OFF, the children also survive."
+    },
+    {
+      "id": "a_rename",
+      "connection": "A",
+      "sql": "ALTER TABLE replacement RENAME TO parent",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_after_drop",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Restore the parent table name; this does not restore deleted children."
+    },
+    {
+      "id": "a_commit",
+      "connection": "A",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_rename",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "A successful COMMIT proves transaction acceptance, not preservation of original records."
+    },
+    {
+      "id": "a_fk_restore",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys=ON",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Re-enable enforcement after COMMIT on A."
+    },
+    {
+      "id": "a_fk_after_commit",
+      "connection": "A",
+      "sql": "PRAGMA foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_restore",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "Read back enabled enforcement on A after COMMIT."
+    },
+    {
+      "id": "a_defer_after_commit",
+      "connection": "A",
+      "sql": "PRAGMA defer_foreign_keys",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_fk_after_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Deferral resets at COMMIT."
+    },
+    {
+      "id": "b_after_commit",
+      "connection": "B",
+      "sql": "SELECT 'parent' AS entity, id, NULL AS parent_id, label, NULL AS amount, NULL AS weight, NULL AS payload, NULL AS memo FROM parent UNION ALL SELECT 'child', id, parent_id, label, amount, weight, payload, memo FROM child ORDER BY entity DESC, id",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_defer_after_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "north"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "parent"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "south"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "101"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "alpha"
+            },
+            {
+              "type": "integer",
+              "value": "9223372036854775807"
+            },
+            {
+              "type": "real",
+              "value": 1.25
+            },
+            {
+              "type": "blob",
+              "value": "00ff"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "102"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "beta"
+            },
+            {
+              "type": "integer",
+              "value": "-7"
+            },
+            {
+              "type": "real",
+              "value": 2.5
+            },
+            {
+              "type": "blob",
+              "value": ""
+            },
+            {
+              "type": "text",
+              "value": ""
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "child"
+            },
+            {
+              "type": "integer",
+              "value": "103"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "text",
+              "value": "gamma"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "real",
+              "value": -0.5
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "text",
+              "value": "kept"
+            }
+          ]
+        ]
+      },
+      "note": "Fresh reading after COMMIT: assert every record, ID, value and SQLite storage type, including BLOB/NULL and integers above 2^53."
+    },
+    {
+      "id": "b_links",
+      "connection": "B",
+      "sql": "SELECT child.id, parent.id, parent.label FROM child JOIN parent ON child.parent_id=parent.id ORDER BY child.id",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_after_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "101"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "north"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "102"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740993"
+            },
+            {
+              "type": "text",
+              "value": "north"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "103"
+            },
+            {
+              "type": "integer",
+              "value": "9007199254740995"
+            },
+            {
+              "type": "text",
+              "value": "south"
+            }
+          ]
+        ]
+      },
+      "note": "Fresh joined reading verifies all three child-parent relationships."
+    },
+    {
+      "id": "b_integrity",
+      "connection": "B",
+      "sql": "PRAGMA integrity_check",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_links",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "ok"
+            }
+          ]
+        ]
+      },
+      "note": "Structural/constraint checks can report ok despite deleted application data. This check does not check foreign keys."
+    },
+    {
+      "id": "b_fk_check",
+      "connection": "B",
+      "sql": "PRAGMA foreign_key_check",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_integrity",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": []
+      },
+      "note": "No dangling foreign keys remain. Deleted children cannot violate a foreign key; empty output does not establish preservation."
+    }
+  ]
+}

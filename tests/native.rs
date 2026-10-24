@@ -41,6 +41,197 @@ async fn all_runbooks_and_portable_recordings() {
         replay.shutdown().await;
     }
 }
+
+#[test]
+fn documented_scenario_runs_and_exports_a_valid_recording() {
+    let document = include_str!("../docs/artifact-format.md");
+    let example = document
+        .split("```json\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let scenario: Scenario = serde_json::from_str(example).unwrap();
+    scenario.validate().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("documented.scenario.json");
+    std::fs::write(&path, example).unwrap();
+    let output = std::process::Command::new(binary())
+        .arg("run")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recording: Recording = serde_json::from_slice(&output.stdout).unwrap();
+    recording.validate().unwrap();
+    assert_eq!(recording.scenario.name, scenario.name);
+    assert!(
+        recording
+            .events
+            .iter()
+            .any(|event| event.operation == "read" && event.kind == "completed")
+    );
+}
+
+#[tokio::test]
+async fn foreign_key_check_is_read_only_and_reports_real_violations() {
+    let e = Engine::new(blank(), binary()).await.unwrap();
+    assert_eq!(
+        exec(&e, "fk_off", "A", "PRAGMA foreign_keys=OFF")
+            .await
+            .kind,
+        "completed"
+    );
+    assert_eq!(
+        exec(
+            &e,
+            "child",
+            "A",
+            "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES t(id))"
+        )
+        .await
+        .kind,
+        "completed"
+    );
+    assert_eq!(
+        exec(&e, "orphan", "A", "INSERT INTO child VALUES(7,999)")
+            .await
+            .kind,
+        "completed"
+    );
+    // Like the lab, B reads the actual data before running diagnostics. In the
+    // bundled SQLite, a bare FK-check PRAGMA can use an already cached schema.
+    assert_eq!(
+        exec(&e, "fresh_data", "B", "SELECT id,parent_id FROM child")
+            .await
+            .data["result"]["rows"],
+        json!([[{"type":"integer","value":"7"},{"type":"integer","value":"999"}]])
+    );
+    for c in ["A", "B"] {
+        let check = exec(&e, &format!("check_{c}"), c, "PRAGMA foreign_key_check").await;
+        assert_eq!(check.kind, "completed");
+        assert_eq!(
+            check.data["result"]["rows"],
+            json!([[{"type":"text","value":"child"},{"type":"integer","value":"7"},{"type":"text","value":"t"},{"type":"integer","value":"0"}]])
+        );
+    }
+    for (i, sql) in [
+        "PRAGMA foreign_key_check=OFF",
+        "PRAGMA foreign_key_check(child)",
+        "PRAGMA main.foreign_key_check('/tmp/outside.db')",
+        "PRAGMA writable_schema=ON",
+        "PRAGMA journal_mode=DELETE",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let event = exec(&e, &format!("deny_check_{i}"), "A", sql).await;
+        assert_eq!(event.kind, "failed", "{sql}");
+        assert_eq!(event.data["error"]["extended"], 23, "{sql}");
+    }
+    assert_eq!(
+        exec(&e, "still_orphan", "B", "SELECT id,parent_id FROM child")
+            .await
+            .data["result"]["rows"],
+        json!([[{"type":"integer","value":"7"},{"type":"integer","value":"999"}]])
+    );
+    assert_eq!(
+        exec(&e, "still_off", "A", "PRAGMA foreign_keys").await.data["result"]["rows"],
+        json!([[{"type":"integer","value":"0"}]])
+    );
+    e.shutdown().await;
+}
+
+#[tokio::test]
+async fn fk_lab_artifacts_and_negative_preservation_assertion() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for (i, builtin) in scenarios::builtins().into_iter().enumerate() {
+        let path = root.join(format!("examples/{:02}.scenario.json", i + 1));
+        let scenario: Scenario = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&scenario).unwrap(),
+            serde_json::to_value(builtin).unwrap()
+        );
+        let path = root.join(format!("examples/recordings/{:02}.recording.json", i + 1));
+        let recording: Recording = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        recording.validate().unwrap();
+        let e = Engine::new(recording.scenario, binary()).await.unwrap();
+        e.replay().await.unwrap();
+        e.shutdown().await;
+    }
+    let path = root.join("examples/fk-preservation-fails.scenario.json");
+    let negative: Scenario = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    // Keep 07's damaging SQL and observations, then assert preservation after
+    // diagnostics. A mismatch must not race CLI shutdown with pending diagnostics.
+    let mut expected = scenarios::builtins().remove(6);
+    let control = scenarios::builtins().remove(11);
+    let preservation = control
+        .operations
+        .iter()
+        .find(|o| o.id == "b_after_commit")
+        .unwrap();
+    let mut preservation = preservation.clone();
+    preservation.id = "b_preservation".into();
+    preservation.after = vec![Dependency {
+        operation: "b_fk_check".into(),
+        event: "completed".into(),
+    }];
+    preservation.note = "Read every original column from a fresh snapshot. Expect a preservation mismatch because the children were deleted; experiment 12 restores them and passes the same check.".into();
+    expected.operations.push(preservation);
+    expected.name = negative.name.clone();
+    expected.description = negative.description.clone();
+    assert_eq!(
+        serde_json::to_value(expected).unwrap(),
+        serde_json::to_value(&negative).unwrap()
+    );
+
+    let e = Engine::new(negative, binary()).await.unwrap();
+    assert_eq!(
+        e.replay().await.unwrap_err(),
+        "Row expectation mismatch for b_preservation"
+    );
+    let record = e.recording().await;
+    record.validate().unwrap();
+    assert!(
+        record
+            .events
+            .iter()
+            .all(|e| !["failed", "cancelled", "timed_out"].contains(&e.kind.as_str()))
+    );
+    let commit = record
+        .events
+        .iter()
+        .find(|e| e.operation == "a_commit" && e.kind == "completed")
+        .unwrap();
+    assert_eq!(commit.data["autocommit"], true);
+    let fresh = record
+        .events
+        .iter()
+        .find(|e| e.operation == "b_after_commit" && e.kind == "completed")
+        .unwrap();
+    assert_eq!(fresh.data["autocommit"], true);
+    assert_eq!(fresh.data["result"]["row_count"], "2");
+    assert_eq!(
+        fresh.data["result"]["rows"][0][1]["value"],
+        "9007199254740993"
+    );
+    e.shutdown().await;
+    // Import and fresh replay of the deliberately failing recording keeps that failure.
+    let path = root.join("examples/recordings/fk-preservation-fails.recording.json");
+    let negative: Recording = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    negative.validate().unwrap();
+    let e = Engine::new(negative.scenario, binary()).await.unwrap();
+    assert_eq!(
+        e.replay().await.unwrap_err(),
+        "Row expectation mismatch for b_preservation"
+    );
+    e.shutdown().await;
+}
 #[tokio::test]
 async fn busy_barrier_keeps_coordinator_and_other_workers_available() {
     let e = Engine::new(blank(), binary()).await.unwrap();

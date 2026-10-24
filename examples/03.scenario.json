@@ -1,7 +1,7 @@
 {
   "format_version": 1,
   "name": "Two writers · no wait",
-  "description": "SQLite allows one writer at a time. Dispatch B, wait for an observed busy callback, then commit A. This retry policy is instrumented, not sqlite3_busy_timeout. https://www.sqlite.org/c3ref/busy_handler.html",
+  "description": "With a zero retry budget, B's write returns SQLITE_BUSY (5) while A holds the writer slot. A then commits; a fresh read sees A's value. Compare with the retry experiment. https://www.sqlite.org/c3ref/busy_handler.html",
   "settings": {
     "journal_mode": "wal",
     "busy_ms": 0,
@@ -51,7 +51,7 @@
       "expect": {
         "extended": 5
       },
-      "note": "Dispatch without waiting; B may retry."
+      "note": "B cannot write while A holds the writer slot; expect SQLITE_BUSY (5) without retrying."
     },
     {
       "id": "a_commit",
@@ -65,7 +65,7 @@
         }
       ],
       "expect": null,
-      "note": "After a confirmed busy callback, release A so B can finish."
+      "note": "After B's write fails, commit A's transaction."
     },
     {
       "id": "b_read",
@@ -88,7 +88,7 @@
           ]
         ]
       },
-      "note": "B's write committed."
+      "note": "Read A's committed value. B's failed write did not change it."
     }
   ]
 }
