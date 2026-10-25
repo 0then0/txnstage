@@ -58,6 +58,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
+python3 -m unittest discover -s tests -p 'test_*.py'
 cd frontend
 pnpm exec playwright install chromium
 pnpm e2e
@@ -101,7 +102,7 @@ From the repository root, package a previously built executable for its matching
 python3 scripts/package-release.py target/release/txnstage macos-arm64
 ```
 
-Accepted platform labels are `linux-x86_64`, `macos-arm64`, `macos-x86_64` and `windows-x86_64`. On Windows, pass the `.exe` path. The script checks the binary's reported platform and writes an archive, a SHA-256 file and environment metadata to `dist/`. Each archive contains the executable, README, license, documentation, scenarios, recordings and icon.
+Accepted platform labels are `linux-x86_64`, `macos-arm64`, `macos-x86_64` and `windows-x86_64`. On Windows, pass the `.exe` path. The script checks the binary's reported platform and writes an archive, a SHA-256 file and environment metadata to `dist/`. Each archive contains the executable, README, license, contribution and community policies, changelog, documentation, scenarios, recordings and icon.
 
 Verify the checksum from the archive's directory:
 

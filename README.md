@@ -119,3 +119,7 @@ Playwright starts the **production binary** and exercises UI → HTTP → worker
 - [FK cascade and data preservation lab](docs/fk-rebuild-lab.md)
 
 License: [Apache-2.0](LICENSE).
+
+## Contributing and project policies
+
+Start with [Contributing](CONTRIBUTING.md) for setup, checks and pull requests. Read the [Code of Conduct](CODE_OF_CONDUCT.md) for community participation, [Security policy](SECURITY.md) for private vulnerability reports, and [Changelog](CHANGELOG.md) for release history and unreleased changes.

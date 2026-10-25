@@ -29,12 +29,17 @@ def main():
     out = pathlib.Path("dist")
     out.mkdir(exist_ok=True)
     name = f"txnstage-{metadata['txnstage']}-{args.platform}"
-    files = [
-        (binary, binary.name),
-        (pathlib.Path("README.md"), "README.md"),
-        (pathlib.Path("LICENSE"), "LICENSE"),
-        (pathlib.Path("frontend/public/icon.svg"), "frontend/public/icon.svg"),
-    ]
+    files = [(binary, binary.name)]
+    for document in (
+        "README.md",
+        "LICENSE",
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+        "CHANGELOG.md",
+    ):
+        files.append((pathlib.Path(document), document))
+    files.append((pathlib.Path("frontend/public/icon.svg"), "frontend/public/icon.svg"))
     for directory in ("docs", "examples"):
         files.extend(
             (source, source.as_posix())

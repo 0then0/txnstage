@@ -26,6 +26,16 @@ cargo test --locked
 
 Tests synchronize on reported events. Timeouts bound hangs, while callback counts and elapsed durations can vary between executions.
 
+## Repository and packaging checks
+
+Run from the repository root:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+These standard-library tests check local documentation links, Git ignore and line-ending rules, pinned workflow actions and credentials settings. Packaging tests exercise both tar.gz and ZIP creation, policy-file inclusion, exclusion of a root `.env`, checksums and environment metadata. They mock only the executable's version response and do not need an installed SQLite or a platform-specific executable.
+
 ## Frontend checks
 
 Run from `frontend`:

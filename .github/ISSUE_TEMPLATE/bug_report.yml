@@ -1,0 +1,42 @@
+name: Bug report
+description: Report incorrect behavior in TxnStage.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security issues, use the private reporting link on the issue chooser.
+        Remove launch tokens, credentials and private data from logs and artifacts.
+  - type: input
+    id: version
+    attributes:
+      label: TxnStage version
+      description: Release version or commit SHA, including whether this is a source build.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, browser and relevant output from txnstage version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Smallest scenario, SQL sequence or UI actions. Attach a sanitized scenario or recording if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error code or message, logs or screenshots where relevant.
+    validations:
+      required: true

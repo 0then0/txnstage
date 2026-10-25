@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/0then0/txnstage/security/advisories/new
+    about: Use the private reporting channel; do not disclose vulnerabilities in public issues.
+  - name: Read the experiment and development guides
+    url: https://github.com/0then0/txnstage#documentation-and-development
+    about: Setup, experiments, artifact format and verification instructions.

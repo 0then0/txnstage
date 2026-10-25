@@ -1,0 +1,22 @@
+name: Feature request
+description: Propose a focused improvement or experiment.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to understand or accomplish with TxnStage?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible outcome, including an example where useful.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and scope
+      description: Existing approaches, constraints and what can stay outside this change.
