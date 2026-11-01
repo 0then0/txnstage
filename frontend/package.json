@@ -19,7 +19,7 @@
 		"@codemirror/view": "^6.38.6"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.0",
+		"@biomejs/biome": "^2.6.4",
 		"@playwright/test": "^1.58.0",
 		"@types/react": "^19.2.0",
 		"@types/react-dom": "^19.2.0",
