@@ -4,6 +4,11 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore frontend builds with Vite 8 by migrating editor chunk configuration to Rolldown's code splitting API.
+- Match the Biome configuration schema to version 2.6.4.
+
 ### Added
 
 - Contribution, conduct and security policies, GitHub issue forms and a pull request template.

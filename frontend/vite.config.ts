@@ -1,10 +1,15 @@
 import { defineConfig } from "vite";
 export default defineConfig({
 	build: {
-		rollupOptions: {
+		rolldownOptions: {
 			output: {
-				manualChunks: {
-					editor: ["codemirror", "@codemirror/lang-sql", "@codemirror/view"],
+				codeSplitting: {
+					groups: [
+						{
+							name: "editor",
+							test: /[/\\]node_modules[/\\](?:codemirror|@codemirror)[/\\]/,
+						},
+					],
 				},
 			},
 		},
