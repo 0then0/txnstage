@@ -6,6 +6,8 @@ license = "Apache-2.0"
 description = "A local visual laboratory for SQLite transactions, concurrency and data preservation"
 repository = "https://github.com/0then0/txnstage"
 readme = "README.md"
+keywords = ["sqlite", "transactions", "concurrency", "wal", "testing"]
+categories = ["database", "development-tools", "command-line-utilities"]
 
 [dependencies]
 axum = "0.8"

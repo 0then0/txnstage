@@ -1,3 +1,4 @@
+//! Loopback HTTP API and embedded web interface for `txnstage serve`.
 use crate::{engine::Engine, model::*, scenarios};
 use axum::{
     Json, Router,

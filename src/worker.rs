@@ -1,4 +1,8 @@
-//! Only this process owns an investigated SQLite connection. Stdout is JSONL only.
+//! Worker process: owns one SQLite connection of an experiment.
+//!
+//! The coordinator starts one worker per connection through the internal
+//! `--worker` mode. Commands arrive as JSON Lines on stdin and observations
+//! leave as JSON Lines on stdout; nothing else is written to stdout.
 use crate::model::{Cell, Operation, Settings};
 use rusqlite::{Connection, ffi};
 use serde_json::{Value, json};
@@ -435,10 +439,17 @@ pub fn run(path: &str, settings: Settings) -> Result<(), Box<dyn std::error::Err
         ffi::sqlite3_busy_handler(db, Some(busy), ptr);
         ffi::sqlite3_progress_handler(db, 1000, Some(progress), ptr);
     }
+    // A new process starts with no transaction; sample it like terminal events do.
+    let transaction = |db| match unsafe { ffi::sqlite3_txn_state(db, std::ptr::null()) } {
+        0 => "none",
+        1 => "read",
+        2 => "write",
+        _ => "unknown",
+    };
     emit(
         "ready",
         "",
-        json!({"pid":std::process::id(),"settings":settings}),
+        json!({"pid":std::process::id(),"settings":settings,"autocommit":conn.is_autocommit(),"transaction":transaction(db)}),
     );
     for op in rx {
         context.operation = op.id.clone();
@@ -458,8 +469,7 @@ pub fn run(path: &str, settings: Settings) -> Result<(), Box<dyn std::error::Err
                 }
             }
         };
-        let tx_state = unsafe { ffi::sqlite3_txn_state(db, std::ptr::null()) };
-        let mut data = json!({"duration_ms":context.started.elapsed().as_millis() as u64,"busy_calls":context.calls,"autocommit":conn.is_autocommit(),"transaction":match tx_state{0=>"none",1=>"read",2=>"write",_=>"unknown"}});
+        let mut data = json!({"duration_ms":context.started.elapsed().as_millis() as u64,"busy_calls":context.calls,"autocommit":conn.is_autocommit(),"transaction":transaction(db)});
         match result {
             Ok(v) => data["result"] = v,
             Err(e) => data["error"] = e,

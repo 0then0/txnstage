@@ -1,5 +1,7 @@
+//! Built-in experiments. `txnstage scenarios` exports them as JSON files.
 use crate::model::*;
 use serde_json::{Value, json};
+mod crash_reopen;
 mod fk_rebuild;
 fn op(
     id: &str,
@@ -12,6 +14,7 @@ fn op(
     Operation {
         id: id.into(),
         connection: c.into(),
+        kind: OperationKind::Sql,
         sql: sql.into(),
         params: vec![],
         after,
@@ -33,7 +36,7 @@ fn rows(v: i64) -> Value {
 }
 fn base(name: &str, description: &str) -> Scenario {
     Scenario {
-        format_version: FORMAT,
+        format_version: FORMAT_SQL,
         name: name.into(),
         description: description.into(),
         settings: Settings::default(),
@@ -344,5 +347,6 @@ pub fn builtins() -> Vec<Scenario> {
     ];
     let mut scenarios = vec![snapshot, writers, zero, deferred, immediate, checkpoint];
     scenarios.extend(fk_rebuild::builtins());
+    scenarios.extend(crash_reopen::builtins());
     scenarios
 }

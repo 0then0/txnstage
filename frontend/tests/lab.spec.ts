@@ -977,3 +977,149 @@ test("replay completion waits for the pending poll before requesting final state
 		releaseState();
 	}
 });
+
+test("process crash and reopen: UI, coordinator, real worker kill, SQL assertion, recording", async ({
+	page,
+}) => {
+	await open(page);
+	await choose(page, "Process crash · uncommitted transaction");
+	await expect(page.locator(".scenario-list")).toContainText(
+		"Process crash & reopen",
+	);
+	const card = page.getByRole("article", { name: "Connection A" });
+	const run = page.getByRole("button", { name: "Run A", exact: true });
+	for (const id of ["a_begin", "a_update", "a_own_view"]) {
+		await next(page);
+		await observed(page, id, "completed");
+	}
+	await expect(card.locator(".transaction")).toContainText("write");
+	await expect(page.locator("#next-step-context")).toContainText(
+		"crash worker process",
+	);
+
+	// Crash from the keyboard, between confirmed statements.
+	await page.getByRole("button", { name: "Crash A", exact: true }).focus();
+	await page.keyboard.press("Enter");
+	await observed(page, "a_crash", "kill sent");
+	await observed(page, "a_crash", "process exited · closed");
+	await expect(card.locator(".status")).toHaveText("closed");
+	await expect(card.locator(".transaction")).toContainText("lost");
+	await expect(run).toBeDisabled();
+	await expect(
+		page.getByRole("button", { name: "Crash A", exact: true }),
+	).toHaveCount(0);
+	await page
+		.locator(".event")
+		.filter({ hasText: "process exited · closed" })
+		.click();
+	await expect(page.locator(".event-facts")).toContainText(
+		"exit confirmed, process reaped",
+	);
+	await expect(page.locator(".event-facts")).toContainText(
+		"transaction write, autocommit off",
+	);
+	// A planned crash is not an experiment failure; B keeps working.
+	await expect(page.getByRole("alert")).toHaveCount(0);
+	await expect(page.locator(".status-state-lost")).toHaveCount(0);
+	await next(page);
+	await expect(
+		(await result(page, "b_while_closed")).locator("tbody tr").first(),
+	).toContainText("100");
+
+	// Reopen the same database with a new worker process.
+	await page.getByRole("button", { name: "Reopen A", exact: true }).focus();
+	await page.keyboard.press("Enter");
+	await observed(page, "a_reopen", "reopened · generation 2");
+	await expect(card.locator(".worker-label")).toContainText("generation 2");
+	await expect(card.locator(".transaction")).toContainText("none");
+	await expect(run).toBeEnabled();
+	await expect(
+		page.getByRole("button", { name: "Crash A", exact: true }),
+	).toBeEnabled();
+
+	// SQL establishes the outcome: the uncommitted change is gone.
+	await next(page);
+	const after = await result(page, "a_after_reopen");
+	await expect(after.locator("tbody tr")).toHaveCount(2);
+	await expect(after.locator("tbody tr").first()).toContainText("100");
+	await next(page);
+	await observed(page, "a_commit_lost", "failed");
+	await expect(
+		page
+			.locator(".step")
+			.filter({ has: page.locator("code", { hasText: /^COMMIT$/ }) }),
+	).toContainText("expected SQL error");
+	await next(page);
+	await observed(page, "a_write", "completed");
+	await next(page);
+	await expect(
+		(await result(page, "b_final")).locator("tbody tr").last(),
+	).toContainText("55");
+
+	// The exported run keeps crash and reopen as replayable steps.
+	const download = page.waitForEvent("download");
+	await page.getByRole("button", { name: "Export run", exact: true }).click();
+	const file = (await (await download).path()) as string;
+	const recording = JSON.parse(await readFile(file, "utf8"));
+	expect(recording.format_version).toBe(2);
+	expect(
+		recording.scenario.operations
+			.filter((o: { kind?: string }) => o.kind)
+			.map((o: { id: string; kind: string }) => [o.id, o.kind]),
+	).toEqual([
+		["a_crash", "crash"],
+		["a_reopen", "reopen"],
+	]);
+	await page.locator("input[type=file]").setInputFiles(file);
+	await expect(
+		page.getByText("Historical recording · read only"),
+	).toBeVisible();
+	await observed(page, "a_reopen", "reopened · generation 2");
+	await expect(
+		page.locator(".step").filter({ hasText: "crash worker process" }),
+	).toContainText("completed");
+	await page
+		.getByRole("button", { name: "Rerun in fresh DB", exact: true })
+		.click();
+	await expect(page.getByRole("status")).toContainText(
+		"All declared expectations matched",
+	);
+	await observed(page, "a_crash", "process exited · closed");
+	await expect(
+		(await result(page, "a_after_reopen")).locator("tbody tr").first(),
+	).toContainText("100");
+
+	// The scheduler's own stepping runs lifecycle steps as well.
+	await page.getByRole("button", { name: "Reset", exact: false }).click();
+	await expect(page.locator(".event")).toHaveCount(0);
+	for (const [id, label] of [
+		["a_begin", "completed"],
+		["a_update", "completed"],
+		["a_own_view", "completed"],
+		["a_crash", "process exited · closed"],
+		["b_while_closed", "completed"],
+		["a_reopen", "reopened · generation 2"],
+	]) {
+		await next(page);
+		await observed(page, id, label);
+	}
+	// Crash is refused while a statement runs on that connection.
+	await edit(
+		page,
+		"A",
+		"WITH RECURSIVE c(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM c WHERE x<1000000000) SELECT sum(x) FROM c",
+	);
+	await run.click();
+	await expect(card.locator(".status")).toHaveText("running");
+	await expect(
+		page.getByRole("button", { name: "Crash A", exact: true }),
+	).toBeDisabled();
+	await page.getByRole("button", { name: "Cancel A", exact: true }).click();
+	await expect(card.locator(".status")).toHaveText("cancelled");
+	await page.setViewportSize({ width: 320, height: 800 });
+	expect(
+		await page.evaluate(
+			() => document.documentElement.scrollWidth <= innerWidth,
+		),
+	).toBe(true);
+});

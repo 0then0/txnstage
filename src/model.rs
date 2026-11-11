@@ -1,7 +1,10 @@
+//! Scenario and recording formats, their validation and size limits.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const FORMAT: u32 = 1;
+/// Version 1 has SQL steps only. Version 2 adds typed `crash` and `reopen` steps.
+pub const FORMAT_SQL: u32 = 1;
+pub const FORMAT: u32 = 2;
 pub const MAX_ARTIFACT: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -38,11 +41,37 @@ pub struct Dependency {
     pub operation: String,
     pub event: String,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    #[default]
+    Sql,
+    /// Forcibly terminate the connection's worker process between statements.
+    Crash,
+    /// Start a new worker process on the same database file.
+    Reopen,
+}
+impl OperationKind {
+    pub fn is_sql(&self) -> bool {
+        *self == Self::Sql
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sql => "sql",
+            Self::Crash => "crash",
+            Self::Reopen => "reopen",
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
     pub id: String,
     pub connection: String,
+    // Omitted for SQL steps, so version 1 artifacts keep their exact shape.
+    #[serde(default, skip_serializing_if = "OperationKind::is_sql")]
+    pub kind: OperationKind,
+    #[serde(default)]
     pub sql: String,
     #[serde(default)]
     pub params: Vec<Cell>,
@@ -80,6 +109,7 @@ pub struct Recording {
     pub environment: Value,
     pub events: Vec<Event>,
 }
+pub const TERMINAL: [&str; 4] = ["completed", "failed", "cancelled", "timed_out"];
 pub fn environment() -> Value {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     let source: String = conn
@@ -117,6 +147,15 @@ pub fn validate_operation(op: &Operation) -> Result<(), String> {
             > 65536
     {
         return Err("Operation metadata exceeds limits".into());
+    }
+    if !op.kind.is_sql() {
+        if !op.sql.is_empty() || !op.params.is_empty() || !op.expect.is_null() {
+            return Err(
+                "crash and reopen steps take no SQL, parameters or expectation; assert with a following SQL step"
+                    .into(),
+            );
+        }
+        return Ok(());
     }
     if op.sql.is_empty() || op.sql.len() > 65536 || op.sql.contains('\0') || op.params.len() > 100 {
         return Err("SQL limit: 64 KiB, one statement, no NUL; at most 100 parameters".into());
@@ -171,7 +210,7 @@ pub fn validate_operation(op: &Operation) -> Result<(), String> {
 }
 impl Scenario {
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != FORMAT {
+        if ![FORMAT_SQL, FORMAT].contains(&self.format_version) {
             return Err("Unsupported scenario format_version".into());
         }
         if self.name.len() > 120 || self.description.len() > 4096 {
@@ -200,8 +239,59 @@ impl Scenario {
             return Err("Scenario exceeds operation/SQL limits".into());
         }
         let mut seen = std::collections::HashSet::new();
+        // Lifecycle steps are checked statically: array order is submission order,
+        // and a declared terminal dependency makes the process state at each step known.
+        let mut previous: std::collections::HashMap<&str, &Operation> = Default::default();
+        let mut closed = std::collections::HashSet::new();
         for op in &self.operations {
             validate_operation(op)?;
+            if !op.kind.is_sql() && self.format_version < FORMAT {
+                return Err("crash and reopen steps require format_version 2".into());
+            }
+            let c = op.connection.as_str();
+            if let Some(p) = previous.get(c)
+                && !(p.kind.is_sql() && op.kind.is_sql())
+            {
+                let Some(d) = op
+                    .after
+                    .iter()
+                    .find(|d| d.operation == p.id && TERMINAL.contains(&d.event.as_str()))
+                else {
+                    return Err(format!(
+                        "Step {} must wait for a terminal event of {} on connection {c}: crash and reopen happen only between confirmed operations",
+                        op.id, p.id
+                    ));
+                };
+                if d.event == "completed" {
+                    match p.kind {
+                        OperationKind::Crash => closed.insert(c),
+                        OperationKind::Reopen => closed.remove(c),
+                        OperationKind::Sql => false,
+                    };
+                }
+            }
+            match (op.kind, closed.contains(c)) {
+                (OperationKind::Sql, true) => {
+                    return Err(format!(
+                        "Step {} runs SQL on connection {c} while it is closed; add a reopen step first",
+                        op.id
+                    ));
+                }
+                (OperationKind::Crash, true) => {
+                    return Err(format!(
+                        "Step {} crashes connection {c}, which is already closed",
+                        op.id
+                    ));
+                }
+                (OperationKind::Reopen, false) => {
+                    return Err(format!(
+                        "Step {} reopens connection {c}, which is open; reopen follows a completed crash of the same connection",
+                        op.id
+                    ));
+                }
+                _ => {}
+            }
+            previous.insert(c, op);
             if op.connection == "C" && s.connections < 3 {
                 return Err("Connection C is disabled".into());
             }
@@ -238,7 +328,8 @@ impl Recording {
         serde_json::to_string(self).map_err(|e| e.to_string())
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != FORMAT
+        if ![FORMAT_SQL, FORMAT].contains(&self.format_version)
+            || self.format_version != self.scenario.format_version
             || self.events.len() > 20000
             || !self.environment.is_object()
         {
@@ -271,7 +362,13 @@ impl Recording {
             if e.data.get("autocommit").is_some_and(|v| !v.is_boolean()) {
                 return Err("Invalid autocommit metadata".into());
             }
-            for field in ["busy_calls", "duration_ms"] {
+            if e.data
+                .get("lifecycle")
+                .is_some_and(|v| v != "crash" && v != "reopen")
+            {
+                return Err("Invalid lifecycle metadata".into());
+            }
+            for field in ["busy_calls", "duration_ms", "generation"] {
                 if e.data.get(field).is_some_and(|v| v.as_u64().is_none()) {
                     return Err("Invalid numeric event metadata".into());
                 }

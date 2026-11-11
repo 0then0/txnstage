@@ -1,0 +1,252 @@
+{
+  "format_version": 2,
+  "name": "Process crash · confirmed COMMIT",
+  "description": "A commits a transaction and the scenario waits for the completed COMMIT before A's worker process is forcibly terminated. With the default WAL setting and autocheckpoint disabled, no checkpoint has run when the process ends. A new worker on the same file reads every committed change. WAL size is only a diagnostic; the queries establish durability across the process crash. https://www.sqlite.org/wal.html",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 2
+  },
+  "initial": [
+    "CREATE TABLE account(id INTEGER PRIMARY KEY, balance INTEGER NOT NULL)",
+    "INSERT INTO account VALUES (1, 100), (2, 50)"
+  ],
+  "operations": [
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "A starts a write transaction."
+    },
+    {
+      "id": "a_update",
+      "connection": "A",
+      "sql": "UPDATE account SET balance = balance - 30 WHERE id = 1",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Change an existing row."
+    },
+    {
+      "id": "a_insert",
+      "connection": "A",
+      "sql": "INSERT INTO account VALUES (3, 30)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_update",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Add a row in the same transaction."
+    },
+    {
+      "id": "a_commit",
+      "connection": "A",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_insert",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "The barrier: COMMIT must report completion before the crash."
+    },
+    {
+      "id": "a_crash",
+      "connection": "A",
+      "kind": "crash",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Forcibly terminate A's worker process after the confirmed COMMIT."
+    },
+    {
+      "id": "b_while_closed",
+      "connection": "B",
+      "sql": "SELECT id, balance FROM account ORDER BY id",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_crash",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            },
+            {
+              "type": "integer",
+              "value": "70"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            },
+            {
+              "type": "integer",
+              "value": "50"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "3"
+            },
+            {
+              "type": "integer",
+              "value": "30"
+            }
+          ]
+        ]
+      },
+      "note": "B reads the committed transaction while A is closed."
+    },
+    {
+      "id": "a_reopen",
+      "connection": "A",
+      "kind": "reopen",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_crash",
+          "event": "completed"
+        },
+        {
+          "operation": "b_while_closed",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Start a new worker for A on the same database file."
+    },
+    {
+      "id": "a_after_reopen",
+      "connection": "A",
+      "sql": "SELECT id, balance FROM account ORDER BY id",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_reopen",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            },
+            {
+              "type": "integer",
+              "value": "70"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            },
+            {
+              "type": "integer",
+              "value": "50"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "3"
+            },
+            {
+              "type": "integer",
+              "value": "30"
+            }
+          ]
+        ]
+      },
+      "note": "Every committed change survived the process crash."
+    },
+    {
+      "id": "a_journal_mode",
+      "connection": "A",
+      "sql": "PRAGMA journal_mode",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_after_reopen",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Diagnostic only: the journal mode the new connection reports."
+    },
+    {
+      "id": "a_write",
+      "connection": "A",
+      "sql": "INSERT INTO account VALUES (4, 1)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_journal_mode",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "The reopened connection can write."
+    },
+    {
+      "id": "b_final",
+      "connection": "B",
+      "sql": "SELECT count(*), sum(balance) FROM account",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_write",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "4"
+            },
+            {
+              "type": "integer",
+              "value": "151"
+            }
+          ]
+        ]
+      },
+      "note": "B reads the committed rows and the new write."
+    }
+  ]
+}

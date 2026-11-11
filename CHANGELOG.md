@@ -11,12 +11,20 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ### Added
 
+- Typed `crash` and `reopen` scenario steps: forcibly terminate one connection's worker process between confirmed statements, then open the same database file with a new worker. Available in scenarios, the CLI, recording replay and the workbench through **Crash** and **Reopen** on each connection card.
+- Three experiments for a process crash with an uncommitted transaction, after a confirmed COMMIT, and during a synthetic partially applied migration.
+- Artifact format version 2 for scenarios and recordings that contain crash or reopen steps. Version 1 files are still read, and a version 1 scenario without such steps is still exported and recorded as version 1.
+- Worker generation numbers in `ready` and lifecycle events, per-connection state in the workbench, and rollback journal size in filesystem samples.
 - Contribution, conduct and security policies, GitHub issue forms and a pull request template.
 - Editor settings matching Rustfmt and Biome, with LF line endings and protection for generated captures.
 - Repository and packaging checks for documentation links, ignored local files and policy files in release archives.
 
 ### Changed
 
+- Bundled SQLite is 3.54.1 on `main`, following the rusqlite 0.41.1 update. Release 0.2.0 archives contain 3.53.2.
+- Rewrite the README for first-time readers, add a documentation index and a repository layout, and restructure the architecture guide.
+- Workbench: experiments are grouped by topic in the list, each schedule step shows its explanation, Crash is visually secondary to Run, and the "fresh database" notice clears once a step runs.
+- Redraw the project icon as two overlapping transactions on separate connection lanes.
 - Pin workflow actions to commit SHAs, cancel superseded CI runs and require release archive uploads to contain files.
 - Include community policies and the changelog in future release archives.
 

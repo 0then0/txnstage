@@ -176,7 +176,21 @@ pre {
 .scenario-list {
 	display: flex;
 	flex-direction: column;
-	gap: 6px;
+	gap: 18px;
+}
+.scenario-list section {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.scenario-list h3 {
+	font:
+		11px ui-monospace,
+		monospace;
+	letter-spacing: 0.6px;
+	text-transform: uppercase;
+	color: #596650;
+	padding: 0 8px 6px;
 }
 .scenario-button {
 	display: flex;
@@ -185,15 +199,9 @@ pre {
 	gap: 10px;
 	background: transparent;
 	border-color: transparent;
-	padding: 12px 8px;
+	padding: 7px 8px;
 	font-size: 12px;
 	line-height: 1.4;
-}
-.scenario-button small {
-	display: block;
-	font-size: 12px;
-	color: #69716a;
-	margin-top: 5px;
 }
 .scenario-number {
 	font:
@@ -211,10 +219,6 @@ pre {
 }
 .scenario-button.chosen .scenario-number {
 	color: var(--accent);
-}
-.arrow {
-	margin-left: auto;
-	color: #a4a99d;
 }
 .sidebar-bottom {
 	margin-top: auto;
@@ -311,6 +315,14 @@ pre {
 .danger {
 	color: #a53c25;
 }
+/* A destructive action that should not compete with the main one beside it. */
+.quiet {
+	background: transparent;
+	border-color: transparent;
+}
+.quiet:hover:not(:disabled) {
+	border-color: #e6b29d;
+}
 .stage {
 	display: grid;
 	grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -383,8 +395,15 @@ pre {
 	color: #855800;
 	border-color: #d4b478;
 }
+.status-reopening {
+	background: #eaf1fa;
+	color: #305f91;
+	border-color: #acc5df;
+}
 .status-error,
 .status-state-lost,
+.status-closed,
+.status-crashing,
 .status-timed_out {
 	background: #fff0e8;
 	color: #aa3f25;
@@ -479,7 +498,13 @@ pre {
 	align-items: center;
 	border-bottom: 1px solid #dce1d5;
 }
+.run-actions {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+}
 .run-row > span {
+	min-width: 0;
 	font:
 		11px ui-monospace,
 		monospace;
@@ -639,6 +664,20 @@ td {
 	white-space: nowrap;
 	text-overflow: ellipsis;
 }
+.step-body {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+.step-body code {
+	display: block;
+}
+.step-body small {
+	font-size: 12px;
+	color: #69716a;
+	overflow-wrap: anywhere;
+}
 .step-state {
 	margin-left: auto;
 	color: #697758;
@@ -753,6 +792,10 @@ td {
 	border-left: 1px solid #394331;
 	padding: 17px 20px;
 	min-width: 0;
+}
+.event-detail > .detail-note {
+	margin: 6px 0;
+	overflow-wrap: anywhere;
 }
 .event-detail > p {
 	font-size: 12px;
@@ -1062,7 +1105,7 @@ footer {
 	}
 }
 
-/* Task context and observation details share the existing workbench palette. */
+/* Next-step context and event details. */
 .skip-link {
 	position: absolute;
 	z-index: 10;

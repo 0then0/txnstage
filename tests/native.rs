@@ -1,6 +1,10 @@
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
-use txnstage::{engine::Engine, model::*, scenarios};
+use txnstage::{
+    engine::{Engine, KILL_METHOD, READY_DEADLINE_MS},
+    model::*,
+    scenarios,
+};
 fn binary() -> PathBuf {
     env!("CARGO_BIN_EXE_txnstage").into()
 }
@@ -13,6 +17,7 @@ fn operation(id: &str, c: &str, sql: &str) -> Operation {
     Operation {
         id: id.into(),
         connection: c.into(),
+        kind: OperationKind::Sql,
         sql: sql.into(),
         params: vec![],
         after: vec![],
@@ -403,7 +408,7 @@ async fn deadlines_worker_crash_and_cleanup() {
     e.wait_event("crashing", None, "running", 2000)
         .await
         .unwrap();
-    e.crash("C").await;
+    e.force_kill("C").await;
     let ev = e.wait_terminal("crashing").await.unwrap();
     assert_eq!(ev.data["state_lost"], true);
     assert_eq!(ev.data["error"]["category"], "infrastructure");
@@ -792,7 +797,7 @@ async fn full_worker_pipe_does_not_block_deadline_cancel_or_stop() {
         })
         .await;
         // Always reap the paused child before reporting a failed assertion.
-        e.crash("A").await;
+        e.force_kill("A").await;
         e.shutdown().await;
         let submitted = tokio::time::timeout(std::time::Duration::from_secs(2), &mut submit).await;
         if submitted.is_err() {
@@ -846,4 +851,675 @@ async fn incremental_snapshots_preserve_history_and_reset_cursors() {
     assert_eq!(reset["event_offset"], 0);
     assert!(!reset["events"].as_array().unwrap().is_empty());
     fresh.shutdown().await;
+}
+
+fn lifecycle(id: &str, c: &str, kind: OperationKind) -> Operation {
+    Operation {
+        kind,
+        ..operation(id, c, "")
+    }
+}
+async fn life(e: &Arc<Engine>, id: &str, c: &str, kind: OperationKind) -> Event {
+    e.submit(lifecycle(id, c, kind)).await.unwrap();
+    e.wait_terminal(id).await.unwrap()
+}
+fn first(ev: &Event) -> &str {
+    ev.data["result"]["rows"][0][0]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no first cell in {}", ev.data))
+}
+fn ready_pids(snapshot: &Value) -> Vec<u64> {
+    snapshot["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "ready")
+        .map(|e| e["data"]["pid"].as_u64().unwrap())
+        .collect()
+}
+#[cfg(unix)]
+fn alive(pid: u64) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[tokio::test]
+async fn crash_reopen_scenarios_hold_in_wal_and_rollback_journal_modes() {
+    for mode in ["wal", "delete"] {
+        for mut scenario in scenarios::builtins().split_off(12) {
+            scenario.settings.journal_mode = mode.into();
+            let label = format!("{} ({mode})", scenario.name);
+            let e = Engine::new(scenario.clone(), binary()).await.unwrap();
+            e.replay()
+                .await
+                .unwrap_or_else(|err| panic!("{label}: {err}"));
+            let record = e.recording().await;
+            record.validate().unwrap();
+            assert_eq!(record.format_version, 2);
+            let event = |id: &str, kind: &str| {
+                record
+                    .events
+                    .iter()
+                    .find(|e| e.operation == id && e.kind == kind)
+                    .unwrap_or_else(|| panic!("{label}: no {id}/{kind}"))
+            };
+            let crash = &event("a_crash", "completed").data;
+            assert_eq!(crash["lifecycle"], "crash");
+            assert_eq!(crash["generation"], 1);
+            assert_eq!(crash["termination"]["method"], KILL_METHOD);
+            assert_eq!(crash["termination"]["exit_confirmed"], true);
+            assert_eq!(crash["termination"]["reaped"], true);
+            let reopen = &event("a_reopen", "completed").data;
+            assert_eq!(reopen["lifecycle"], "reopen");
+            assert_eq!(reopen["generation"], 2);
+            assert_eq!(reopen["transaction"], "none");
+            assert_eq!(reopen["autocommit"], true);
+            assert_ne!(reopen["pid"], crash["pid"]);
+            // The process exit and the new start are ordered, confirmed observations.
+            assert!(event("a_crash", "completed").seq < event("a_reopen", "created").seq);
+            // A planned crash is not an infrastructure failure.
+            assert!(record.events.iter().all(|e| e.kind != "worker_lost"));
+            assert_eq!(e.snapshot().await["lost"], json!([]));
+            // Initialization ran once, before the crash.
+            assert_eq!(
+                record
+                    .events
+                    .iter()
+                    .filter(|e| e.operation.starts_with("seed_") && e.kind == "created")
+                    .count(),
+                scenario.initial.len()
+            );
+            if let Some(journal) = record
+                .events
+                .iter()
+                .find(|e| e.operation == "a_journal_mode" && e.kind == "completed")
+            {
+                assert_eq!(first(journal), mode);
+            }
+            e.shutdown().await;
+            // The exported run replays its crash and reopen at the same logical points.
+            let decoded: Recording =
+                serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+            let lifecycle: Vec<_> = decoded
+                .scenario
+                .operations
+                .iter()
+                .filter(|o| !o.kind.is_sql())
+                .map(|o| (o.id.as_str(), o.kind))
+                .collect();
+            assert_eq!(
+                lifecycle,
+                [
+                    ("a_crash", OperationKind::Crash),
+                    ("a_reopen", OperationKind::Reopen)
+                ]
+            );
+            let replay = Engine::new(decoded.scenario, binary()).await.unwrap();
+            replay
+                .replay()
+                .await
+                .unwrap_or_else(|err| panic!("{label} replay: {err}"));
+            replay.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn crash_loses_only_session_state_and_other_connections_continue() {
+    for mode in ["wal", "delete"] {
+        let mut s = blank();
+        s.settings.journal_mode = mode.into();
+        let seeds = s.initial.len();
+        let e = Engine::new(s, binary()).await.unwrap();
+        let dir = e.directory.path().to_path_buf();
+        // Committed before the crash; it also proves the file is not recreated.
+        exec(&e, "committed", "A", "UPDATE t SET v=7").await;
+        exec(&e, "fk_off", "A", "PRAGMA foreign_keys=OFF").await;
+        exec(&e, "temp", "A", "CREATE TEMP TABLE scratch(x)").await;
+        // B holds a read transaction across A's crash.
+        exec(&e, "b_begin", "B", "BEGIN").await;
+        assert_eq!(
+            first(&exec(&e, "b_read", "B", "SELECT v FROM t").await),
+            "7"
+        );
+        exec(&e, "a_begin", "A", "BEGIN IMMEDIATE").await;
+        let open = exec(&e, "a_insert", "A", "INSERT INTO t VALUES(2,2)").await;
+        assert_eq!(open.data["transaction"], "write");
+
+        let crash = life(&e, "crash", "A", OperationKind::Crash).await;
+        assert_eq!(crash.kind, "completed", "{mode}: {}", crash.data);
+        assert_eq!(crash.data["session_state"]["lost"], true);
+        assert_eq!(
+            crash.data["session_state"]["last_sampled"],
+            json!({"transaction":"write","autocommit":false})
+        );
+        let snapshot = e.snapshot().await;
+        assert_eq!(
+            snapshot["connections"]["A"],
+            json!({"phase":"closed","generation":1})
+        );
+        assert_eq!(snapshot["connections"]["B"]["phase"], "open");
+        assert_eq!(snapshot["lost"], json!([]));
+        assert_eq!(snapshot["active"], json!({}));
+        assert_eq!(snapshot["stopped"], false);
+
+        // Unambiguous transitions for a closed connection.
+        let sql = e.submit(operation("closed_sql", "A", "SELECT 1")).await;
+        assert!(
+            sql.unwrap_err()
+                .contains("closed after a planned process crash")
+        );
+        let again = e
+            .submit(lifecycle("crash_twice", "A", OperationKind::Crash))
+            .await;
+        assert!(again.unwrap_err().contains("already closed"));
+
+        // B's transaction survives; C can write while A is closed.
+        let still = exec(&e, "b_still", "B", "SELECT count(*) FROM t").await;
+        assert_eq!(first(&still), "1");
+        assert_eq!(still.data["transaction"], "read");
+        assert_eq!(exec(&e, "b_commit", "B", "COMMIT").await.kind, "completed");
+        assert_eq!(
+            exec(&e, "c_write", "C", "UPDATE t SET v=8").await.kind,
+            "completed",
+            "{mode}"
+        );
+
+        let reopen = life(&e, "reopen", "A", OperationKind::Reopen).await;
+        assert_eq!(reopen.kind, "completed", "{mode}: {}", reopen.data);
+        assert_eq!(reopen.data["generation"], 2);
+        assert_eq!(e.snapshot().await["connections"]["A"]["phase"], "open");
+        let twice = e
+            .submit(lifecycle("reopen_twice", "A", OperationKind::Reopen))
+            .await;
+        assert!(twice.unwrap_err().contains("already open"));
+
+        // Data: the uncommitted insert is gone, both commits remain.
+        assert_eq!(
+            exec(&e, "a_rows", "A", "SELECT id, v FROM t").await.data["result"]["rows"],
+            json!([[{"type":"integer","value":"1"},{"type":"integer","value":"8"}]]),
+            "{mode}"
+        );
+        // Session state: no transaction, default PRAGMA value, no temporary table.
+        let commit = exec(&e, "a_commit", "A", "COMMIT").await;
+        assert_eq!(commit.kind, "failed");
+        assert_eq!(commit.data["error"]["extended"], 1);
+        assert_eq!(
+            first(&exec(&e, "fk", "A", "PRAGMA foreign_keys").await),
+            "1"
+        );
+        assert_eq!(
+            exec(&e, "no_temp", "A", "SELECT * FROM scratch").await.kind,
+            "failed"
+        );
+        // The worker startup contract is applied to the new process.
+        assert_eq!(
+            first(&exec(&e, "autockpt", "A", "PRAGMA wal_autocheckpoint").await),
+            "0"
+        );
+        assert_eq!(
+            first(&exec(&e, "mode", "A", "PRAGMA journal_mode").await),
+            mode
+        );
+        assert_eq!(
+            exec(&e, "deny", "A", "PRAGMA journal_mode=OFF").await.kind,
+            "failed"
+        );
+        assert_eq!(
+            exec(&e, "a_write", "A", "INSERT INTO t VALUES(3,3)")
+                .await
+                .kind,
+            "completed"
+        );
+        assert_eq!(
+            first(&exec(&e, "b_count", "B", "SELECT count(*) FROM t").await),
+            "2"
+        );
+        let snapshot = e.snapshot().await;
+        assert_eq!(
+            snapshot["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|o| o["id"].as_str().unwrap().starts_with("seed_"))
+                .count(),
+            seeds
+        );
+        let record = e.recording().await;
+        record.validate().unwrap();
+        assert_eq!(record.format_version, 2);
+        e.stop().await;
+        assert!(!dir.exists());
+    }
+}
+
+#[tokio::test]
+async fn crash_needs_a_statement_boundary_and_unplanned_loss_still_needs_reset() {
+    let e = Engine::new(blank(), binary()).await.unwrap();
+    e.submit(operation("long", "A", LONG)).await.unwrap();
+    e.wait_event("long", None, "running", 2000).await.unwrap();
+    let refused = e
+        .submit(lifecycle("mid_statement", "A", OperationKind::Crash))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("running statement"), "{refused}");
+    let snapshot = e.snapshot().await;
+    assert_eq!(snapshot["active"]["A"], "long");
+    assert_eq!(snapshot["connections"]["A"]["phase"], "open");
+    assert!(
+        snapshot["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|ev| ev["operation"] != "mid_statement")
+    );
+    e.cancel("A", "cancelled").await;
+    assert_eq!(e.wait_terminal("long").await.unwrap().kind, "cancelled");
+    // The refused crash left the worker and its generation untouched.
+    assert_eq!(exec(&e, "alive", "A", "SELECT 1").await.kind, "completed");
+    assert_eq!(e.snapshot().await["connections"]["A"]["generation"], 1);
+
+    e.submit(operation("killed", "B", LONG)).await.unwrap();
+    e.wait_event("killed", None, "running", 2000).await.unwrap();
+    e.force_kill("B").await;
+    assert_eq!(
+        e.wait_terminal("killed").await.unwrap().data["state_lost"],
+        true
+    );
+    for kind in [OperationKind::Reopen, OperationKind::Crash] {
+        let err = e
+            .submit(lifecycle(&format!("lost_{}", kind.as_str()), "B", kind))
+            .await
+            .unwrap_err();
+        assert!(err.contains("reset required"), "{err}");
+    }
+    assert_eq!(e.snapshot().await["lost"], json!(["B"]));
+    e.shutdown().await;
+}
+
+#[test]
+fn lifecycle_steps_are_validated_statically() {
+    let after = |id: &str, event: &str| {
+        vec![Dependency {
+            operation: id.into(),
+            event: event.into(),
+        }]
+    };
+    let step = |id: &str, kind, dep: &str| {
+        let mut op = lifecycle(id, "A", kind);
+        if !dep.is_empty() {
+            op.after = after(dep, "completed");
+        }
+        op
+    };
+    let sql = |id: &str, dep: &str| {
+        let mut op = operation(id, "A", "SELECT 1");
+        if !dep.is_empty() {
+            op.after = after(dep, "completed");
+        }
+        op
+    };
+    let check = |version: u32, operations: Vec<Operation>| {
+        let mut s = blank();
+        s.format_version = version;
+        s.operations = operations;
+        s.validate()
+    };
+    use OperationKind::{Crash, Reopen};
+    assert!(
+        check(
+            2,
+            vec![
+                sql("q", ""),
+                step("c", Crash, "q"),
+                step("r", Reopen, "c"),
+                sql("q2", "r")
+            ]
+        )
+        .is_ok()
+    );
+    // A crash may open a schedule: initialization is confirmed before any step.
+    assert!(check(2, vec![step("c", Crash, ""), step("r", Reopen, "c")]).is_ok());
+    for (expected, version, operations) in [
+        ("format_version 2", 1, vec![step("c", Crash, "")]),
+        (
+            "must wait for a terminal event of q",
+            2,
+            vec![sql("q", ""), step("c", Crash, "")],
+        ),
+        (
+            "must wait for a terminal event of c",
+            2,
+            vec![step("c", Crash, ""), step("r", Reopen, "")],
+        ),
+        (
+            "while it is closed",
+            2,
+            vec![step("c", Crash, ""), sql("q", "c")],
+        ),
+        (
+            "already closed",
+            2,
+            vec![step("c", Crash, ""), step("c2", Crash, "c")],
+        ),
+        ("which is open", 2, vec![step("r", Reopen, "")]),
+        (
+            "must wait for a terminal event of r",
+            2,
+            vec![step("c", Crash, ""), step("r", Reopen, "c"), sql("q", "")],
+        ),
+    ] {
+        let err = check(version, operations).unwrap_err();
+        assert!(err.contains(expected), "{expected}: {err}");
+    }
+    // A failed reopen leaves the connection closed, so a recorded retry stays valid.
+    let mut retry = step("r2", Reopen, "");
+    retry.after = after("r", "timed_out");
+    assert!(check(2, vec![step("c", Crash, ""), step("r", Reopen, "c"), retry]).is_ok());
+    let mut with_sql = lifecycle("c", "A", Crash);
+    with_sql.sql = "SELECT 1".into();
+    assert!(validate_operation(&with_sql).is_err());
+    let mut with_expectation = lifecycle("c", "A", Crash);
+    with_expectation.expect = json!({"rows":[]});
+    assert!(validate_operation(&with_expectation).is_err());
+    assert!(
+        serde_json::from_value::<Operation>(json!({"id":"x","connection":"A","kind":"restart"}))
+            .is_err()
+    );
+    // Version 1 artifacts keep their shape: SQL steps do not gain a kind field.
+    let encoded = serde_json::to_value(operation("q", "A", "SELECT 1")).unwrap();
+    assert!(encoded.get("kind").is_none());
+    assert_eq!(
+        serde_json::to_value(lifecycle("c", "A", Crash)).unwrap()["kind"],
+        "crash"
+    );
+}
+
+#[tokio::test]
+async fn stale_generation_messages_never_reach_the_reopened_session() {
+    let e = Engine::new(blank(), binary()).await.unwrap();
+    let count = |snapshot: &Value, kind: &str| {
+        snapshot["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|ev| ev["connection"] == "A" && ev["kind"] == kind)
+            .count()
+    };
+    let busy = json!({"kind":"busy","operation":"held","data":{"calls":1}});
+    life(&e, "crash", "A", OperationKind::Crash).await;
+    let closed = e.snapshot().await["events"].as_array().unwrap().len();
+    // Buffered output of the reaped process arrives while the connection is closed.
+    e.observe_from("A", 1, busy.clone()).await;
+    assert_eq!(
+        e.snapshot().await["events"].as_array().unwrap().len(),
+        closed
+    );
+    life(&e, "reopen", "A", OperationKind::Reopen).await;
+    e.submit(operation("held", "A", LONG)).await.unwrap();
+    e.wait_event("held", None, "running", 2000).await.unwrap();
+    // The same connection ID and operation ID, but the previous process session.
+    e.observe_from("A", 1, busy.clone()).await;
+    e.observe_from(
+        "A",
+        1,
+        json!({"kind":"completed","operation":"held","data":{"transaction":"none","autocommit":true}}),
+    )
+    .await;
+    e.observe_from(
+        "A",
+        1,
+        json!({"kind":"ready","operation":"","data":{"pid":1}}),
+    )
+    .await;
+    let snapshot = e.snapshot().await;
+    assert_eq!(snapshot["active"]["A"], "held");
+    assert_eq!(count(&snapshot, "busy"), 0);
+    assert!(
+        snapshot["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|ev| ev["operation"] != "held" || ev["kind"] != "completed")
+    );
+    assert_eq!(count(&snapshot, "ready"), 2);
+    // Control: the current generation is accepted through the same entry point.
+    e.observe_from("A", 2, busy).await;
+    assert_eq!(count(&e.snapshot().await, "busy"), 1);
+    // Workers can never report on a lifecycle operation, whatever their generation.
+    e.observe_from(
+        "A",
+        2,
+        json!({"kind":"failed","operation":"reopen","data":{}}),
+    )
+    .await;
+    assert_eq!(count(&e.snapshot().await, "failed"), 0);
+    e.cancel("A", "cancelled").await;
+    assert_eq!(e.wait_terminal("held").await.unwrap().kind, "cancelled");
+    e.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_reopen_is_bounded_and_leaves_a_retryable_closed_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Written before any use so no concurrently forked child still holds it open.
+    #[cfg(unix)]
+    let silent = {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmp.path().join("silent-worker");
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let e = Engine::new(blank(), binary()).await.unwrap();
+    let dir = e.directory.path().to_path_buf();
+    exec(&e, "committed", "A", "UPDATE t SET v=5").await;
+    life(&e, "crash", "A", OperationKind::Crash).await;
+    let closed = |snapshot: Value| {
+        assert_eq!(snapshot["connections"]["A"]["phase"], "closed");
+        assert_eq!(snapshot["lost"], json!([]));
+        assert_eq!(snapshot["active"], json!({}));
+    };
+
+    // The worker cannot be started at all.
+    e.set_worker_executable(tmp.path().join("missing-worker"));
+    let started = std::time::Instant::now();
+    let missing = life(&e, "missing", "A", OperationKind::Reopen).await;
+    assert!(started.elapsed().as_secs() < 2);
+    assert_eq!(missing.kind, "failed");
+    assert_eq!(missing.data["error"]["category"], "infrastructure");
+    assert_eq!(missing.data["connection"], "closed");
+    closed(e.snapshot().await);
+    assert!(
+        e.submit(operation("still_closed", "A", "SELECT 1"))
+            .await
+            .is_err()
+    );
+
+    #[cfg(unix)]
+    {
+        // The process starts but never reports ready: bounded by the ready deadline, then reaped.
+        e.set_worker_executable(silent.clone());
+        let started = std::time::Instant::now();
+        e.submit(lifecycle("silent", "A", OperationKind::Reopen))
+            .await
+            .unwrap();
+        let pid = e
+            .wait_event("silent", None, "running", 2000)
+            .await
+            .unwrap()
+            .data["pid"]
+            .as_u64()
+            .unwrap();
+        let silent_end = e.wait_terminal("silent").await.unwrap();
+        let elapsed = started.elapsed().as_millis() as u64;
+        assert_eq!(silent_end.kind, "timed_out");
+        assert!(
+            (READY_DEADLINE_MS..READY_DEADLINE_MS + 3000).contains(&elapsed),
+            "{elapsed}"
+        );
+        assert!(!alive(pid), "a failed reopen must reap its process");
+        closed(e.snapshot().await);
+
+        // Cancellation ends a reopen in flight without waiting for the deadline.
+        let started = std::time::Instant::now();
+        e.submit(lifecycle("cancelled", "A", OperationKind::Reopen))
+            .await
+            .unwrap();
+        let pid = e
+            .wait_event("cancelled", None, "running", 2000)
+            .await
+            .unwrap()
+            .data["pid"]
+            .as_u64()
+            .unwrap();
+        e.cancel("A", "cancelled").await;
+        assert_eq!(
+            e.wait_terminal("cancelled").await.unwrap().kind,
+            "cancelled"
+        );
+        assert!(started.elapsed().as_secs() < 3);
+        assert!(!alive(pid));
+        closed(e.snapshot().await);
+    }
+
+    // The closed state is still retryable, and the data is what was committed.
+    e.set_worker_executable(binary());
+    let reopened = life(&e, "retry", "A", OperationKind::Reopen).await;
+    assert_eq!(reopened.kind, "completed", "{}", reopened.data);
+    assert_eq!(reopened.data["generation"], if cfg!(unix) { 5 } else { 3 });
+    assert_eq!(first(&exec(&e, "read", "A", "SELECT v FROM t").await), "5");
+    // Failed attempts are part of the run; the exported artifact remains valid.
+    e.recording().await.validate().unwrap();
+
+    #[cfg(unix)]
+    {
+        // Stop during a partially completed reopen: bounded, terminal, nothing left behind.
+        life(&e, "crash_again", "A", OperationKind::Crash).await;
+        e.set_worker_executable(silent);
+        e.submit(lifecycle("stopped", "A", OperationKind::Reopen))
+            .await
+            .unwrap();
+        e.wait_event("stopped", None, "running", 2000)
+            .await
+            .unwrap();
+        let pids = ready_pids(&e.snapshot().await);
+        tokio::time::timeout(std::time::Duration::from_secs(3), e.stop())
+            .await
+            .expect("stop blocked behind a reopen in flight");
+        assert_eq!(e.wait_terminal("stopped").await.unwrap().kind, "cancelled");
+        assert!(pids.into_iter().all(|pid| !alive(pid)));
+    }
+    e.stop().await;
+    assert!(!dir.exists());
+}
+
+#[tokio::test]
+async fn stop_and_reset_after_crash_and_reopen_reap_every_generation() {
+    // Stop while a connection is closed.
+    let e = Engine::new(blank(), binary()).await.unwrap();
+    let dir = e.directory.path().to_path_buf();
+    exec(&e, "begin", "A", "BEGIN IMMEDIATE").await;
+    life(&e, "crash", "A", OperationKind::Crash).await;
+    let pids = ready_pids(&e.snapshot().await);
+    tokio::time::timeout(std::time::Duration::from_secs(5), e.stop())
+        .await
+        .unwrap();
+    assert!(!dir.exists());
+    assert!(
+        e.submit(lifecycle("after_stop", "A", OperationKind::Reopen))
+            .await
+            .is_err()
+    );
+    #[cfg(unix)]
+    assert!(pids.iter().all(|pid| !alive(*pid)));
+    assert_eq!(pids.len(), 3);
+
+    // Reset is stop plus a fresh experiment: nothing of the crashed one carries over.
+    let fresh = Engine::new(blank(), binary()).await.unwrap();
+    let snapshot = fresh.snapshot().await;
+    for c in ["A", "B", "C"] {
+        assert_eq!(
+            snapshot["connections"][c],
+            json!({"phase":"open","generation":1})
+        );
+    }
+    // Stop with a reopened connection in the middle of a statement and a transaction.
+    let dir = fresh.directory.path().to_path_buf();
+    life(&fresh, "crash", "A", OperationKind::Crash).await;
+    life(&fresh, "reopen", "A", OperationKind::Reopen).await;
+    exec(&fresh, "begin", "A", "BEGIN IMMEDIATE").await;
+    fresh.submit(operation("long", "A", LONG)).await.unwrap();
+    fresh
+        .wait_event("long", None, "running", 2000)
+        .await
+        .unwrap();
+    let pids = ready_pids(&fresh.snapshot().await);
+    assert_eq!(pids.len(), 4, "three initial workers and one reopened");
+    tokio::time::timeout(std::time::Duration::from_secs(5), fresh.stop())
+        .await
+        .unwrap();
+    assert_eq!(fresh.wait_terminal("long").await.unwrap().kind, "cancelled");
+    assert!(!dir.exists());
+    #[cfg(unix)]
+    assert!(pids.iter().all(|pid| !alive(*pid)));
+}
+
+#[test]
+fn cli_runs_crash_scenarios_and_keeps_version_1_artifacts_readable() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let tmp = tempfile::tempdir().unwrap();
+    let run = |input: &std::path::Path, name: &str| {
+        let output = tmp.path().join(name);
+        let result = std::process::Command::new(binary())
+            .arg("run")
+            .arg(input)
+            .arg("--output")
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}: {}",
+            input.display(),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let recording: Recording =
+            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        recording.validate().unwrap();
+        (output, recording)
+    };
+    for number in 13..=15 {
+        let scenario = root.join(format!("examples/{number}.scenario.json"));
+        let (path, first_run) = run(&scenario, "run.recording.json");
+        // Replaying the recording crashes and reopens again in a new disposable experiment.
+        let (_, rerun) = run(&path, "rerun.recording.json");
+        for recording in [&first_run, &rerun] {
+            assert_eq!(recording.format_version, 2);
+            let confirmed: Vec<_> = recording
+                .events
+                .iter()
+                .filter(|e| e.kind == "completed" && e.data.get("lifecycle").is_some())
+                .map(|e| (e.operation.as_str(), e.data["generation"].as_u64().unwrap()))
+                .collect();
+            assert_eq!(confirmed, [("a_crash", 1), ("a_reopen", 2)]);
+        }
+        // Intent is portable; observed process identity is not.
+        assert_eq!(
+            serde_json::to_value(&first_run.scenario.operations).unwrap(),
+            serde_json::to_value(&rerun.scenario.operations).unwrap()
+        );
+    }
+    // A recording made before lifecycle steps existed imports, replays and stays version 1.
+    let old = root.join("examples/recordings/01.recording.json");
+    let stored: Value = serde_json::from_slice(&std::fs::read(&old).unwrap()).unwrap();
+    assert_eq!(stored["format_version"], 1);
+    assert!(stored["events"][0]["data"].get("generation").is_none());
+    let (_, replayed) = run(&old, "old.recording.json");
+    assert_eq!(replayed.format_version, 1);
+    assert_eq!(replayed.scenario.format_version, 1);
 }

@@ -6,13 +6,19 @@ import { ResultTable } from "./ResultTable";
 import { SqlEditor } from "./SqlEditor";
 import { mergeSnapshot, statePath } from "./snapshot";
 import {
+	closedInEvents,
 	type Event,
+	eventLabel,
+	type Lifecycle,
+	lifecycleOf,
 	type Operation,
+	type Phase,
 	parseParams,
 	type Recording,
 	ready,
 	type Scenario,
 	type Snapshot,
+	stepLabel,
 	terminal,
 } from "./types";
 import "./style.css";
@@ -43,6 +49,12 @@ function download(name: string, data: unknown) {
 	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 type Conn = "A" | "B" | "C";
+// Built-in experiments are listed in catalog order; these ranges group them.
+const experimentGroups = [
+	{ title: "Snapshots, writers & checkpoints", from: 0, to: 6 },
+	{ title: "FK cascade & data preservation", from: 6, to: 12 },
+	{ title: "Process crash & reopen", from: 12, to: 15 },
+];
 const connections: Conn[] = ["A", "B", "C"];
 function editorValues(s: Scenario, used: string[] = []) {
 	const text = { A: "", B: "", C: "" },
@@ -52,7 +64,7 @@ function editorValues(s: Scenario, used: string[] = []) {
 		const o = s.operations.find(
 			(o) => o.connection === c && !used.includes(o.id),
 		);
-		text[c] = o?.sql ?? "SELECT 1";
+		text[c] = o && !lifecycleOf(o) ? o.sql : "SELECT 1";
 		ps[c] = JSON.stringify(o?.params ?? []);
 		selectedIds[c] = o?.id ?? "";
 	}
@@ -250,7 +262,10 @@ function App() {
 	async function execute(c: Conn, supplied?: Operation) {
 		if (!state || !draft || recording) return;
 		const gen = generation.current;
-		const original = supplied ?? draft.operations.find((o) => o.id === ids[c]);
+		// A selected crash/reopen step is run by its own button, never as SQL.
+		const original =
+			supplied ??
+			draft.operations.find((o) => o.id === ids[c] && !lifecycleOf(o));
 		const text = supplied?.sql ?? sql[c],
 			bound = supplied?.params ?? parseParams(params[c]);
 		const op: Operation = {
@@ -271,15 +286,52 @@ function App() {
 		};
 		await api("execute", op);
 		if (!current(gen)) return;
+		// The "fresh database" notice no longer describes the experiment.
+		setNotice("");
 		await refresh();
 		if (!current(gen)) return;
-		const used = [...state.operations.map((o) => o.id), op.id];
-		const next = draft.operations.find(
+		advance(draft, c, [...state.operations.map((o) => o.id), op.id], text);
+	}
+	function advance(s: Scenario, c: Conn, used: string[], text?: string) {
+		const next = s.operations.find(
 			(o) => o.connection === c && !used.includes(o.id),
 		);
 		setIds((v) => ({ ...v, [c]: next?.id ?? "" }));
+		// A lifecycle step has no SQL; keep what the editor already shows.
+		if (text === undefined || (next && lifecycleOf(next))) return;
 		setSql((v) => ({ ...v, [c]: next?.sql ?? text }));
 		setParams((v) => ({ ...v, [c]: JSON.stringify(next?.params ?? []) }));
+	}
+	async function lifecycle(c: Conn, kind: Lifecycle, supplied?: Operation) {
+		if (!state || !draft || recording) return;
+		const gen = generation.current;
+		const original =
+			supplied ??
+			draft.operations.find((o) => o.id === ids[c] && o.kind === kind);
+		const op: Operation = {
+			id:
+				original && !state.operations.some((o) => o.id === original.id)
+					? original.id
+					: `manual_${crypto.randomUUID()}`,
+			connection: c,
+			kind,
+			sql: "",
+			params: [],
+			after: [],
+			expect: null,
+			note:
+				original?.note ??
+				(kind === "crash"
+					? "Manual process crash between statements"
+					: "Manual reopen of the same database"),
+		};
+		await api("execute", op);
+		if (!current(gen)) return;
+		// The "fresh database" notice no longer describes the experiment.
+		setNotice("");
+		await refresh();
+		if (!current(gen)) return;
+		advance(draft, c, [...state.operations.map((o) => o.id), op.id]);
 	}
 	async function importFile(f: File) {
 		if (f.size > MAX_ARTIFACT) throw new Error("Artifact limit is 8 MiB");
@@ -304,7 +356,7 @@ function App() {
 				if (!current(gen)) return;
 				setDraft(s);
 				setRecording({
-					format_version: 1,
+					format_version: s.format_version,
 					scenario: s,
 					environment: {},
 					events: [],
@@ -347,12 +399,16 @@ function App() {
 	function selectOp(o: Operation) {
 		const c = o.connection as Conn;
 		setIds((v) => ({ ...v, [c]: o.id }));
+		if (lifecycleOf(o)) return;
 		setSql((v) => ({ ...v, [c]: o.sql }));
 		setParams((v) => ({ ...v, [c]: JSON.stringify(o.params) }));
 	}
 	function editSql(c: Conn, text: string) {
 		setSql((v) => ({ ...v, [c]: text }));
-		if (ids[c])
+		const chosen = draft?.operations.find((o) => o.id === ids[c]);
+		// Typing SQL while a crash/reopen step is selected starts custom SQL.
+		if (chosen && lifecycleOf(chosen)) setIds((v) => ({ ...v, [c]: "" }));
+		else if (ids[c])
 			setDraft((s) =>
 				s
 					? {
@@ -399,10 +455,10 @@ function App() {
 			</header>
 			<div className="workspace">
 				<aside className="sidebar">
-					<div className="eyebrow">EXPERIMENT LIBRARY</div>
 					<h2>Experiments</h2>
 					<p className="muted">
-						Choose a schedule, step through SQL and inspect what SQLite reports.
+						Run real SQL on separate SQLite connections, one step at a time, and
+						see what each connection observes.
 					</p>
 					<label className="mobile-experiment">
 						Experiment
@@ -420,48 +476,45 @@ function App() {
 							<option value="" disabled>
 								Imported scenario
 							</option>
-							{presets.map((p, i) => (
-								<option key={p.name} value={p.name}>
-									{String(i + 1).padStart(2, "0")} · {p.name}
-								</option>
+							{experimentGroups.map((group) => (
+								<optgroup key={group.title} label={group.title}>
+									{presets.slice(group.from, group.to).map((p, offset) => (
+										<option key={p.name} value={p.name}>
+											{String(group.from + offset + 1).padStart(2, "0")} ·{" "}
+											{p.name}
+										</option>
+									))}
+								</optgroup>
 							))}
 						</select>
 					</label>
-					<div className="scenario-list">
-						{presets.map((p, i) => (
-							<button
-								type="button"
-								className={`scenario-button ${p.name === draft.name ? "chosen" : ""}`}
-								aria-current={p.name === draft.name ? "true" : undefined}
-								key={p.name}
-								disabled={pending}
-								onClick={() => action(() => reset(p))}
-							>
-								<span className="scenario-number">
-									{String(i + 1).padStart(2, "0")}
-								</span>
-								<span>
-									{p.name}
-									<small>
-										{i === 0
-											? "Snapshot isolation"
-											: i < 3
-												? "Writer contention"
-												: i < 5
-													? "Transaction scheduling"
-													: i === 5
-														? "WAL maintenance"
-														: "FK cascade & data preservation"}
-									</small>
-								</span>
-								<span className="arrow">↗</span>
-							</button>
+					<nav className="scenario-list" aria-label="Experiments">
+						{experimentGroups.map((group) => (
+							<section key={group.title} aria-label={group.title}>
+								<h3>{group.title}</h3>
+								{presets.slice(group.from, group.to).map((p, offset) => (
+									<button
+										type="button"
+										className={`scenario-button ${p.name === draft.name ? "chosen" : ""}`}
+										aria-current={p.name === draft.name ? "true" : undefined}
+										key={p.name}
+										disabled={pending}
+										onClick={() => action(() => reset(p))}
+									>
+										<span className="scenario-number">
+											{String(group.from + offset + 1).padStart(2, "0")}
+										</span>
+										<span>{p.name}</span>
+									</button>
+								))}
+							</section>
 						))}
-					</div>
+					</nav>
 					<div className="sidebar-bottom">
-						<p>FACTS, THEN EXPLANATIONS</p>
+						<p>HOW IT WORKS</p>
 						<span>
-							Native SQLite. One process per connection. No simulated locks.
+							Real SQLite, one process per connection, and a temporary database
+							for each experiment. Locks are never simulated.
 						</span>
 						<a
 							href="https://www.sqlite.org/isolation.html"
@@ -596,7 +649,13 @@ function App() {
 								className="primary"
 								aria-describedby="next-step-context"
 								onClick={() =>
-									next && action(() => execute(next.connection as Conn, next))
+									next &&
+									action(() => {
+										const kind = lifecycleOf(next);
+										return kind
+											? lifecycle(next.connection as Conn, kind, next)
+											: execute(next.connection as Conn, next);
+									})
 								}
 							>
 								▶ Next ready step
@@ -650,7 +709,7 @@ function App() {
 										{next.connection}
 									</span>
 									<strong>Next ready</strong>
-									<code>{next.sql}</code>
+									<code>{stepLabel(next)}</code>
 									<span>{next.note || next.id}</span>
 								</div>
 							) : (
@@ -790,16 +849,36 @@ function App() {
 									events.some(
 										(e) => e.operation === runningId && e.kind === "busy",
 									),
+								// Planned crash and reopen are connection states, not failures.
+								phase: Phase = recording
+									? closedInEvents(events, c)
+										? "closed"
+										: "open"
+									: (state.connections?.[c]?.phase ?? "open"),
+								workerGeneration = recording
+									? undefined
+									: state.connections?.[c]?.generation,
+								chosenCrash = draft.operations.find(
+									(o) =>
+										o.id === ids[c] && o.kind === "crash" && !used.has(o.id),
+								),
+								blocked =
+									!!recording ||
+									state.stopped ||
+									pending ||
+									state.lost.includes(c),
 								status =
 									!recording && state.lost.includes(c)
 										? "state lost"
-										: runningId
-											? isBusy
-												? "busy observed"
-												: "running"
-											: last?.kind === "failed"
-												? "error"
-												: (last?.kind ?? "ready"),
+										: phase !== "open"
+											? phase
+											: runningId
+												? isBusy
+													? "busy observed"
+													: "running"
+												: last?.kind === "failed"
+													? "error"
+													: (last?.kind ?? "ready"),
 								tx = [...events]
 									.reverse()
 									.find((e) => e.connection === c && e.data.transaction);
@@ -815,6 +894,9 @@ function App() {
 											<h2>Connection {c}</h2>
 											<span className="worker-label">
 												Independent worker process
+												{workerGeneration && workerGeneration > 1
+													? ` · generation ${workerGeneration}`
+													: ""}
 											</span>
 										</div>
 										<span
@@ -825,10 +907,15 @@ function App() {
 									</div>
 									<div className="transaction">
 										<span>TRANSACTION</span>
-										<strong>{tx?.data.transaction ?? "none"}</strong>
+										<strong>
+											{phase === "closed"
+												? "lost"
+												: (tx?.data.transaction ?? "none")}
+										</strong>
 										<span>
-											autocommit {tx?.data.autocommit === false ? "off" : "on"}{" "}
-											· last statement
+											{phase === "closed"
+												? "process terminated · session state discarded"
+												: `autocommit ${tx?.data.autocommit === false ? "off" : "on"} · last statement`}
 										</span>
 									</div>
 									<div className="editor-caption">
@@ -861,7 +948,7 @@ function App() {
 										value={sql[c]}
 										onChange={(v) => editSql(c, v)}
 										onRun={() => {
-											if (!runningId && !recording && !pending)
+											if (!runningId && !blocked && phase === "open")
 												action(() => execute(c));
 										}}
 									/>
@@ -883,7 +970,7 @@ function App() {
 															? {
 																	...s,
 																	operations: s.operations.map((o) =>
-																		o.id === ids[c]
+																		o.id === ids[c] && !lifecycleOf(o)
 																			? { ...o, params: parsed, expect: null }
 																			: o,
 																	),
@@ -899,30 +986,57 @@ function App() {
 										<small>INTEGER: decimal string. BLOB: hex.</small>
 									</details>
 									<div className="run-row">
-										<span>{runningId ?? "⌘ / Ctrl + Enter"}</span>
-										{runningId ? (
-											<button
-												type="button"
-												className="danger"
-												onClick={() => action(() => cancelConnection(c))}
-											>
-												Cancel {c}
-											</button>
-										) : (
-											<button
-												type="button"
-												disabled={
-													!!recording ||
-													state.stopped ||
-													pending ||
-													state.lost.includes(c)
-												}
-												aria-label={`Run ${c}`}
-												onClick={() => action(() => execute(c))}
-											>
-												▶ Run {c}
-											</button>
-										)}
+										<span>
+											{runningId ??
+												(phase === "closed"
+													? "Closed · reopen to run SQL"
+													: chosenCrash
+														? `Step ${chosenCrash.id} · use Crash ${c}`
+														: "⌘ / Ctrl + Enter")}
+										</span>
+										<div className="run-actions">
+											{phase === "closed" ? (
+												<button
+													type="button"
+													disabled={blocked}
+													aria-label={`Reopen ${c}`}
+													title="Start a new worker process on the same database file. Initialization SQL is not rerun."
+													onClick={() => action(() => lifecycle(c, "reopen"))}
+												>
+													↻ Reopen {c}
+												</button>
+											) : (
+												<button
+													type="button"
+													className="danger quiet"
+													disabled={blocked || phase !== "open" || !!runningId}
+													aria-label={`Crash ${c}`}
+													title="Forcibly terminate this connection's worker process. Available between statements."
+													onClick={() => action(() => lifecycle(c, "crash"))}
+												>
+													✕ Crash {c}
+												</button>
+											)}
+											{runningId ? (
+												<button
+													type="button"
+													className="danger"
+													disabled={phase === "crashing"}
+													onClick={() => action(() => cancelConnection(c))}
+												>
+													Cancel {c}
+												</button>
+											) : (
+												<button
+													type="button"
+													disabled={blocked || phase !== "open"}
+													aria-label={`Run ${c}`}
+													onClick={() => action(() => execute(c))}
+												>
+													▶ Run {c}
+												</button>
+											)}
+										</div>
 									</div>
 									<div className="result">
 										<div className="result-heading">
@@ -937,7 +1051,11 @@ function App() {
 										{last?.data.error ? (
 											<div className="sql-error">
 												<strong>
-													{last.kind === "failed" ? "SQL error" : last.kind}{" "}
+													{last.kind !== "failed"
+														? last.kind
+														: last.data.error.category === "infrastructure"
+															? "Infrastructure error"
+															: "SQL error"}{" "}
 													{last.data.error.extended !== undefined
 														? `· ${last.data.error.extended}`
 														: ""}
@@ -968,11 +1086,22 @@ function App() {
 														: ""}
 												</p>
 											</>
+										) : last?.data.lifecycle ? (
+											<p className="empty-result">
+												{last.data.lifecycle === "crash"
+													? "Worker process forcibly terminated; exit confirmed. Its transaction and session state are lost."
+													: `New worker process, generation ${last.data.generation}, opened the same database file.`}
+												<br />
+												{last.data.lifecycle === "crash"
+													? "Reopen, then query to see what the database kept."
+													: "Initialization SQL was not rerun."}
+											</p>
 										) : (
 											<p className="empty-result">
-												Run a statement to observe its result.
+												No result yet.
 												<br />
-												Every operation uses native SQLite.
+												Run a statement to see its rows or error and the
+												transaction state.
 											</p>
 										)}
 									</div>
@@ -1023,7 +1152,10 @@ function App() {
 										<span className={`step-conn conn-${o.connection}`}>
 											{o.connection}
 										</span>
-										<code>{o.sql}</code>
+										<span className="step-body">
+											<code>{stepLabel(o)}</code>
+											{o.note && <small>{o.note}</small>}
+										</span>
 										<span className="step-state">
 											{historical
 												? "historical observation"
@@ -1117,7 +1249,7 @@ function App() {
 											</span>
 											<code>{e.operation}</code>
 											<span className={`event-kind kind-${e.kind}`}>
-												{e.kind === "busy" ? "busy observed" : e.kind}
+												{eventLabel(e)}
 											</span>
 										</button>
 									))

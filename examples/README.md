@@ -22,6 +22,16 @@ These scenarios are available in the workbench's **Experiments** list and as por
 
 The [FK rebuild guide](../docs/fk-rebuild-lab.md) explains the SQL, inspection points, SQLite source ID and Drizzle/D1 context. These experiments demonstrate local SQLite behavior; the preservation control applies to the example's simple schema.
 
+## Process crash and reopen
+
+These scenarios forcibly terminate the worker process of connection A between two confirmed statements, then start a new worker on the same database file. They model the abrupt end of one process. Power loss, storage faults and a crash in the middle of COMMIT are outside their scope.
+
+- [13 · Uncommitted transaction](13.scenario.json): A changes a row inside an open transaction and its process is terminated. After reopen the original rows remain, COMMIT fails because no transaction exists, and a new write succeeds.
+- [14 · Confirmed COMMIT](14.scenario.json): the crash follows a completed COMMIT. B reads the committed rows while A is closed, and the reopened A reads them too.
+- [15 · Partial migration](15.scenario.json): a synthetic application migration commits its CREATE TABLE separately and is terminated during the data copy. After reopen the table exists but is empty. A naive rerun fails on the existing table; a prepared resumable rerun completes and B checks schema and data independently. The example is an application contract written for this lab, not an ORM migration runner and not a SQLite defect.
+
+Outcomes are established by queries after reopen. WAL and journal file sizes in the events are diagnostics. 13 and 14 hold in both WAL and DELETE journal modes; change the mode under **Environment & settings** and rerun. The [architecture notes](../docs/architecture.md#process-crash-and-reopen) describe the lifecycle, and the [artifact format](../docs/artifact-format.md#process-crash-and-reopen-steps) describes the steps. These three scenarios use format version 2.
+
 ## Run a scenario
 
 From the repository root, using a built executable:
@@ -31,7 +41,7 @@ From the repository root, using a built executable:
 ./target/release/txnstage run snapshot.recording.json --output replay.recording.json
 ```
 
-All twelve built-ins should exit **0** when their expectations match, including expected SQLite errors and observed cascade loss.
+All fifteen built-ins should exit **0** when their expectations match, including expected SQLite errors, observed cascade loss and planned process crashes.
 
 The separate [preservation assertion example](fk-preservation-fails.scenario.json) runs 07's damaging rebuild, then requires every original record. It intentionally exits **1** with `Row expectation mismatch for b_preservation`. Compare it with 12, which restores children and passes the same complete-record expectation.
 
@@ -42,7 +52,7 @@ The separate [preservation assertion example](fk-preservation-fails.scenario.jso
 
 ## Inspect and replay recordings
 
-The [recordings directory](recordings/) contains captured executions of all twelve scenarios and the preservation assertion example. Open a scenario or recording with **Import** in the workbench. Import displays the file without executing SQL; **Rerun in fresh DB** starts an explicit fresh execution.
+The [recordings directory](recordings/) contains captured executions of all fifteen scenarios and the preservation assertion example. Open a scenario or recording with **Import** in the workbench. Import displays the file without executing SQL; **Rerun in fresh DB** starts an explicit fresh execution.
 
 To replay a supplied recording from the command line:
 

@@ -12,6 +12,8 @@ export interface Settings {
 export interface Operation {
 	id: string;
 	connection: string;
+	// Absent for SQL steps. Lifecycle steps carry no SQL, parameters or expectation.
+	kind?: "sql" | "crash" | "reopen";
 	sql: string;
 	params: Cell[];
 	after: { operation: string; event: string }[];
@@ -66,11 +68,53 @@ export interface Snapshot {
 	scenario: Scenario;
 	environment: Record<string, unknown>;
 	events: Event[];
+	connections?: Record<string, { phase: Phase; generation: number }>;
 	active: Record<string, string>;
 	lost: string[];
 	stopped: boolean;
 	operations: Operation[];
 	files: { db_bytes: number; wal_bytes: number; elapsed_ms: number };
+}
+export type Lifecycle = "crash" | "reopen";
+export type Phase = "open" | "crashing" | "closed" | "reopening";
+export const lifecycleOf = (op: Pick<Operation, "kind">): Lifecycle | null =>
+	op.kind === "crash" || op.kind === "reopen" ? op.kind : null;
+export function stepLabel(op: Operation): string {
+	const kind = lifecycleOf(op);
+	if (kind === "crash") return "crash worker process";
+	return kind === "reopen" ? "reopen same database" : op.sql;
+}
+export function eventLabel(e: Event): string {
+	if (e.kind === "busy") return "busy observed";
+	const labels: Record<string, Record<string, string>> = {
+		crash: {
+			created: "crash requested",
+			running: "kill sent",
+			completed: "process exited · closed",
+		},
+		reopen: {
+			created: "reopen requested",
+			running: "worker started",
+			completed: `reopened · generation ${e.data.generation}`,
+		},
+	};
+	const lifecycle = String(e.data.lifecycle ?? "");
+	if (!labels[lifecycle]) return e.kind;
+	return labels[lifecycle][e.kind] ?? `${lifecycle} ${e.kind}`;
+}
+// Recordings have no live coordinator state: a connection is closed from a
+// completed crash until a completed reopen.
+export function closedInEvents(events: Event[], connection: string): boolean {
+	for (let i = events.length - 1; i >= 0; i--) {
+		const e = events[i];
+		if (
+			e.connection === connection &&
+			e.kind === "completed" &&
+			e.data.lifecycle
+		)
+			return e.data.lifecycle === "crash";
+	}
+	return false;
 }
 export const terminal = (kind: string) =>
 	["completed", "failed", "cancelled", "timed_out"].includes(kind);

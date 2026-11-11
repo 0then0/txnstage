@@ -11,6 +11,17 @@ TxnStage uses Rust for the execution engine, React and CodeMirror for the web in
 
 A system SQLite installation is not required. Preserve `Cargo.lock` and `frontend/pnpm-lock.yaml` when building an existing revision. Run pnpm commands from `frontend` so Corepack can resolve the package-manager version declared there.
 
+## Repository layout
+
+- `src/`: the Rust crate. `main.rs` is the command line, `server.rs` the HTTP API, `engine.rs` the coordinator, `worker.rs` the per-connection worker process, `model.rs` the artifact formats and `scenarios*` the built-in experiments.
+- `frontend/`: the React interface (`src/`), its unit tests next to the sources, and the Playwright browser tests (`tests/`).
+- `tests/`: native integration tests (`native.rs`) and repository and packaging checks (`test_repository.py`).
+- `examples/`: the built-in experiments as scenario files, with sample recordings.
+- `docs/`: guides, listed in the [documentation index](README.md).
+- `scripts/`: the standalone-executable check and archive packaging.
+
+[Architecture](architecture.md) explains how these parts work together.
+
 ## Build and run
 
 From the repository root:
@@ -72,7 +83,7 @@ The [verification guide](verification.md) describes test coverage, reports and f
 
 ## Update examples
 
-The built-in scenarios are defined in `src/scenarios.rs` and `src/scenarios/fk_rebuild.rs`. After changing a scenario, export the catalog and record the affected examples with the built executable:
+The built-in scenarios are defined in `src/scenarios.rs`, `src/scenarios/fk_rebuild.rs` and `src/scenarios/crash_reopen.rs`. After changing a scenario, export the catalog and record the affected examples with the built executable:
 
 ```sh
 ./target/release/txnstage scenarios examples
@@ -80,7 +91,7 @@ The built-in scenarios are defined in `src/scenarios.rs` and `src/scenarios/fk_r
 ./target/release/txnstage run examples/recordings/07.recording.json --output replay.recording.json
 ```
 
-The `scenarios` command overwrites numbered scenario files in its destination. The preservation-assertion example is a separate file, `examples/fk-preservation-fails.scenario.json`; it intentionally exits 1 and is not part of the successful built-in catalog. Keep its final complete-record expectation consistent with the preservation control. Native tests verify catalog files and replay the FK recordings.
+The `scenarios` command overwrites numbered scenario files in its destination. The preservation-assertion example is a separate file, `examples/fk-preservation-fails.scenario.json`; it intentionally exits 1 and is not part of the successful built-in catalog. Keep its final complete-record expectation consistent with the preservation control. Native tests verify catalog files and replay the stored recordings.
 
 ## Update documentation images
 

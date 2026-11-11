@@ -1,0 +1,385 @@
+{
+  "format_version": 2,
+  "name": "Process crash · partial migration",
+  "description": "A synthetic application contract: migration 2 creates a contact table, copies every customer email into it and records version 2. The application commits the CREATE separately, then the process is terminated during the copy. After reopen the table exists but is empty and version 2 is not recorded. A naive rerun stops at the existing table; a prepared resumable rerun completes and is checked independently. This is not an ORM migration runner and not a SQLite defect. https://www.sqlite.org/lang_transaction.html",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 2
+  },
+  "initial": [
+    "CREATE TABLE customer(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL)",
+    "CREATE TABLE applied_migration(version INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+    "INSERT INTO customer VALUES (1, 'Ada', 'ada@example.test'), (2, 'Lin', 'lin@example.test')",
+    "INSERT INTO applied_migration VALUES (1, 'customers')"
+  ],
+  "operations": [
+    {
+      "id": "a_ddl_begin",
+      "connection": "A",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [],
+      "expect": null,
+      "note": "Migration 2, part one: schema change in its own transaction."
+    },
+    {
+      "id": "a_ddl_create",
+      "connection": "A",
+      "sql": "CREATE TABLE contact(customer_id INTEGER PRIMARY KEY REFERENCES customer(id), email TEXT NOT NULL)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_ddl_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Create the new table."
+    },
+    {
+      "id": "a_ddl_commit",
+      "connection": "A",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_ddl_create",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Part one is committed separately. This is the application's choice."
+    },
+    {
+      "id": "a_copy_begin",
+      "connection": "A",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_ddl_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Part two: copy data and record the version."
+    },
+    {
+      "id": "a_copy",
+      "connection": "A",
+      "sql": "INSERT INTO contact SELECT id, email FROM customer",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_copy_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Copy the emails without committing."
+    },
+    {
+      "id": "a_crash",
+      "connection": "A",
+      "kind": "crash",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_copy",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Forcibly terminate the migrating process before part two commits."
+    },
+    {
+      "id": "a_reopen",
+      "connection": "A",
+      "kind": "reopen",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_crash",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Start a new worker on the same database file."
+    },
+    {
+      "id": "a_left_schema",
+      "connection": "A",
+      "sql": "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_reopen",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "applied_migration"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "contact"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "customer"
+            }
+          ]
+        ]
+      },
+      "note": "What remained: the committed table exists."
+    },
+    {
+      "id": "a_left_rows",
+      "connection": "A",
+      "sql": "SELECT (SELECT count(*) FROM contact), (SELECT max(version) FROM applied_migration)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_left_schema",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "The copy is gone and the recorded version is still 1."
+    },
+    {
+      "id": "a_naive_create",
+      "connection": "A",
+      "sql": "CREATE TABLE contact(customer_id INTEGER PRIMARY KEY REFERENCES customer(id), email TEXT NOT NULL)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_left_rows",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "extended": 1
+      },
+      "note": "Naive rerun from the top. Expected SQLITE_ERROR (1): table contact already exists."
+    },
+    {
+      "id": "a_naive_state",
+      "connection": "A",
+      "sql": "SELECT (SELECT count(*) FROM contact), (SELECT max(version) FROM applied_migration)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_naive_create",
+          "event": "failed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "note": "The naive rerun stopped at its first statement and migrated nothing."
+    },
+    {
+      "id": "a_resume_create",
+      "connection": "A",
+      "sql": "CREATE TABLE IF NOT EXISTS contact(customer_id INTEGER PRIMARY KEY REFERENCES customer(id), email TEXT NOT NULL)",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_naive_state",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Resumable rerun: accept the table created before the crash."
+    },
+    {
+      "id": "a_resume_begin",
+      "connection": "A",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_resume_create",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Copy and version record share one transaction."
+    },
+    {
+      "id": "a_resume_copy",
+      "connection": "A",
+      "sql": "INSERT OR IGNORE INTO contact SELECT id, email FROM customer",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_resume_begin",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Copy only the rows that are missing."
+    },
+    {
+      "id": "a_resume_version",
+      "connection": "A",
+      "sql": "INSERT OR IGNORE INTO applied_migration VALUES (2, 'contacts')",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_resume_copy",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Record version 2 once."
+    },
+    {
+      "id": "a_resume_commit",
+      "connection": "A",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_resume_version",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Complete the migration."
+    },
+    {
+      "id": "b_schema",
+      "connection": "B",
+      "sql": "SELECT name FROM pragma_table_info('contact') ORDER BY cid",
+      "params": [],
+      "after": [
+        {
+          "operation": "a_resume_commit",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "customer_id"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "email"
+            }
+          ]
+        ]
+      },
+      "note": "Independent schema check from another connection."
+    },
+    {
+      "id": "b_data",
+      "connection": "B",
+      "sql": "SELECT c.name, k.email FROM customer AS c JOIN contact AS k ON k.customer_id = c.id ORDER BY c.id",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_schema",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "Ada"
+            },
+            {
+              "type": "text",
+              "value": "ada@example.test"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "value": "Lin"
+            },
+            {
+              "type": "text",
+              "value": "lin@example.test"
+            }
+          ]
+        ]
+      },
+      "note": "Independent data check: every customer has its email."
+    },
+    {
+      "id": "b_version",
+      "connection": "B",
+      "sql": "SELECT version FROM applied_migration ORDER BY version",
+      "params": [],
+      "after": [
+        {
+          "operation": "b_data",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            }
+          ]
+        ]
+      },
+      "note": "Version 2 is recorded exactly once."
+    }
+  ]
+}

@@ -19,7 +19,10 @@ cargo test --locked
 - The executable JSON example in the artifact reference, through the CLI and recording validator.
 - The [FK rebuild experiments](fk-rebuild-lab.md): committed cascade loss, PRAGMA scope and deferral, WAL snapshots, complete-record preservation and a failing preservation assertion with successful SQL events.
 - Writer contention, observed busy callbacks and progress on another connection while a worker waits.
-- Cancellation, deadlines, worker crashes, pipe backpressure and experiment-directory cleanup. Unix-specific checks use SIGSTOP to pause a worker.
+- Planned process crash and reopen in WAL and DELETE journal modes: rollback of an uncommitted transaction, survival of a confirmed COMMIT, the partial migration example, other connections continuing, lost transaction and PRAGMA state, no repeated initialization and writes after reopen.
+- Crash and reopen lifecycle: rejected transitions, static scenario validation, a reopen that cannot start or never reports ready, cancellation and Stop during a reopen, reaping of every worker generation and rejection of messages from an earlier generation. Checks with a silent worker and process liveness are Unix-specific.
+- Import and replay of version 1 artifacts and of version 2 recordings through the CLI.
+- Cancellation, deadlines, unplanned worker kills, pipe backpressure and experiment-directory cleanup. Unix-specific checks use SIGSTOP to pause a worker.
 - INTEGER precision, NULL, BLOB, REAL, RETURNING, trigger bodies and SQL statement boundaries.
 - Read-only FK diagnostics with a real orphan, rejected PRAGMA arguments and blocked filesystem, extension and instrumentation changes.
 - Checkpoint result validation, result-preview limits, large-recording export/replay and state polling without hidden checkpoint SQL.
@@ -59,7 +62,7 @@ pnpm e2e
 
 Playwright starts the release executable and drives Chromium through the interface, HTTP API, workers and bundled SQLite. Set `TXNSTAGE_BINARY` to an absolute path to select another executable.
 
-The tests cover schedule execution, expected error 517, contention, cancellation, reset, recording export/import/rerun, editing without rewriting history and stale asynchronous replies. FK tests inspect data before DROP, after DROP and after COMMIT; compare old and fresh WAL reads; check large integer display; and distinguish a failing preservation assertion from a passing control. After successful replay, they also execute the default custom SQL against the FK schema.
+One test drives a process crash end to end: Crash and Reopen from the keyboard, the closed card and timeline entries, a row assertion after reopen, export, import, rerun and scheduler stepping. The other tests cover schedule execution, expected error 517, contention, cancellation, reset, recording export/import/rerun, editing without rewriting history and stale asynchronous replies. FK tests inspect data before DROP, after DROP and after COMMIT; compare old and fresh WAL reads; check large integer display; and distinguish a failing preservation assertion from a passing control. After successful replay, they also execute the default custom SQL against the FK schema.
 
 Interface checks cover keyboard actions, event filtering, settings, read-only imports, long Cyrillic text and viewport widths from 320 to 1440 CSS pixels. A large-recording test runs Chromium with fourfold CPU throttling and checks pagination, incremental polling and recording round trips. Automated browser checks cover these interactions; screen-reader and broader accessibility testing need separate assessment.
 

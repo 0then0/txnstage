@@ -1,3 +1,4 @@
+//! Command-line entry point: `serve`, `run`, `scenarios`, `version` and the internal `--worker` mode.
 use txnstage::{
     engine::Engine,
     model::{self, Recording, Scenario},
