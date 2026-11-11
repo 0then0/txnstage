@@ -1,7 +1,10 @@
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
+// The silent-worker check that measures this deadline is Unix-only.
+#[cfg(unix)]
+use txnstage::engine::READY_DEADLINE_MS;
 use txnstage::{
-    engine::{Engine, KILL_METHOD, READY_DEADLINE_MS},
+    engine::{Engine, KILL_METHOD},
     model::*,
     scenarios,
 };
