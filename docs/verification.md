@@ -60,7 +60,7 @@ pnpm exec playwright install chromium
 pnpm e2e
 ```
 
-Playwright starts the release executable and drives Chromium through the interface, HTTP API, workers and bundled SQLite. Set `TXNSTAGE_BINARY` to an absolute path to select another executable.
+Playwright starts the release executable and drives a Chromium-based browser through the interface, HTTP API, workers and bundled SQLite. Linux CI uses the Google Chrome included in the hosted runner image through `PLAYWRIGHT_CHROME=1`; macOS and Windows CI install Playwright Chromium. Linux CI checks the installed Chrome version before running all UI tests and does not install APT packages. Set `TXNSTAGE_BINARY` to an absolute path to select another executable.
 
 One test drives a process crash end to end: Crash and Reopen from the keyboard, the closed card and timeline entries, a row assertion after reopen, export, import, rerun and scheduler stepping. The other tests cover schedule execution, expected error 517, contention, cancellation, reset, recording export/import/rerun, editing without rewriting history and stale asynchronous replies. FK tests inspect data before DROP, after DROP and after COMMIT; compare old and fresh WAL reads; check large integer display; and distinguish a failing preservation assertion from a passing control. After successful replay, they also execute the default custom SQL against the FK schema.
 

@@ -79,7 +79,7 @@ python3 scripts/smoke-release.py
 
 Playwright needs permission to start Chromium and access loopback HTTP. On Linux, its system libraries may also be required; run `pnpm exec playwright install --with-deps chromium` from `frontend` when preparing a machine. Set `TXNSTAGE_BINARY` to an absolute executable path to test another build.
 
-The [verification guide](verification.md) describes test coverage, reports and failure investigation. CI is configured to run frontend checks, native tests, release builds and Chromium tests on Linux, macOS and Windows. Consult the [workflow results](https://github.com/0then0/txnstage/actions/workflows/ci.yml) for a particular revision.
+The [verification guide](verification.md) describes test coverage, reports and failure investigation. CI is configured to run frontend checks, native tests, release builds and browser tests on Linux, macOS and Windows. Linux CI uses preinstalled Google Chrome (`PLAYWRIGHT_CHROME=1`) to avoid installing system packages from APT mirrors; macOS and Windows use Playwright Chromium. Consult the [workflow results](https://github.com/0then0/txnstage/actions/workflows/ci.yml) for a particular revision.
 
 ## Update examples
 

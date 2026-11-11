@@ -53,8 +53,15 @@ jobs:
       - run: pnpm --dir frontend build
       - run: cargo test --locked
       - run: cargo build --release --locked
-      - run: pnpm --dir frontend exec playwright install --with-deps chromium
+      - name: Check preinstalled Chrome on Linux
+        if: runner.os == 'Linux'
+        run: google-chrome --version
+      - name: Install Chromium on macOS and Windows
+        if: runner.os != 'Linux'
+        run: pnpm --dir frontend exec playwright install chromium
       - run: pnpm --dir frontend e2e
+        env:
+          PLAYWRIGHT_CHROME: ${{ runner.os == 'Linux' && '1' || '' }}
       - run: python scripts/package-release.py '${{ matrix.binary }}' '${{ matrix.label }}'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

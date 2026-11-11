@@ -6,6 +6,8 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ### Fixed
 
+- Use preinstalled Google Chrome for Linux CI browser tests, avoiding APT mirror availability failures while keeping the full UI suite.
+
 - Pin Linux CI and release builds to Ubuntu 24.04 LTS for a stable browser-dependency and libc baseline.
 
 - Allow up to 15 seconds for large-recording completion messages in the CPU-throttled UI test, including on slower macOS Intel runners.
