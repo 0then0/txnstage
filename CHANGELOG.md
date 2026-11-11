@@ -4,6 +4,8 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-11
+
 ### Fixed
 
 - Restore frontend builds with Vite 8 by migrating editor chunk configuration to Rolldown's code splitting API.
@@ -21,7 +23,7 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ### Changed
 
-- Bundled SQLite is 3.54.1 on `main`, following the rusqlite 0.41.1 update. Release 0.2.0 archives contain 3.53.2.
+- Update bundled SQLite from 3.53.2 to 3.54.1 through rusqlite 0.41.1.
 - Rewrite the README for first-time readers, add a documentation index and a repository layout, and restructure the architecture guide.
 - Workbench: experiments are grouped by topic in the list, each schedule step shows its explanation, Crash is visually secondary to Run, and the "fresh database" notice clears once a step runs.
 - Redraw the project icon as two overlapping transactions on separate connection lanes.
@@ -67,7 +69,8 @@ User-visible changes are grouped by release. Versions link to the published rele
 - Typed results, event timelines, cancellation, scenario export and recording import/replay.
 - Standalone Linux x86_64, macOS ARM64 and Windows x86_64 archives with bundled SQLite 3.53.2.
 
-[Unreleased]: https://github.com/0then0/txnstage/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/0then0/txnstage/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/0then0/txnstage/releases/tag/v0.3.0
 [0.2.0]: https://github.com/0then0/txnstage/releases/tag/v0.2.0
 [0.1.1]: https://github.com/0then0/txnstage/releases/tag/v0.1.1
 [0.1.0]: https://github.com/0then0/txnstage/releases/tag/v0.1.0

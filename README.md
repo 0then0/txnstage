@@ -2,7 +2,7 @@
 
 # TxnStage
 
-[![Version](https://img.shields.io/badge/version-0.2.0-344b38)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.3.0-344b38)](Cargo.toml)
 [![SQLite](https://img.shields.io/badge/SQLite-3.54.1_bundled-536b8b)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-8e602d)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/0then0/txnstage/ci.yml?label=CI)](https://github.com/0then0/txnstage/actions/workflows/ci.yml)
@@ -79,7 +79,7 @@ Fifteen experiments are built in and are also available as files in [examples](e
 - **07–12 · FK rebuild**: rebuilding a parent table can keep the parents and delete their children through `ON DELETE CASCADE`, while COMMIT and both integrity checks succeed. The [FK rebuild guide](docs/fk-rebuild-lab.md) explains the SQL, PRAGMA settings, preservation checks and the Drizzle/D1 context.
 - **13–15 · Process crash**: one connection's process is terminated and the same database is reopened. An uncommitted transaction is gone, a confirmed COMMIT remains, and a partially applied synthetic migration needs a resumable rerun. These model the abrupt end of a single process, not power loss or storage faults. See the [catalog](examples/README.md#process-crash-and-reopen).
 
-Experiments 13–15 and the Crash and Reopen actions were added after release 0.2.0. Until the next release they are available in a source build; the [changelog](CHANGELOG.md) lists what each release contains.
+Experiments 13–15 and the Crash and Reopen actions require release 0.3.0 or later. The [changelog](CHANGELOG.md) lists what each release contains.
 
 ## Using the workbench
 
