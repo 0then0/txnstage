@@ -442,7 +442,8 @@ test("large compact UI recording survives export, import and rerun", async ({
 	// Two full replays and multi-MiB artifact I/O run under deliberate CPU throttling.
 	test.slow();
 	const cdp = await page.context().newCDPSession(page);
-	// Exercise the large result on a slower CPU without relaxing completion deadlines.
+	// Large snapshot parsing and rendering also run under fourfold CPU throttling.
+	// Give both completion assertions a bounded budget within this slow test.
 	await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
 	await freshSnapshot(page);
 	const columns = Array.from({ length: 100 }, (_, i) => `x AS c${i}`).join(",");
@@ -487,6 +488,7 @@ test("large compact UI recording survives export, import and rerun", async ({
 	await replayed.finished();
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
+		{ timeout: 15000 },
 	);
 	const idleResponse = await page.waitForResponse((response) => {
 		const url = new URL(response.url());
@@ -540,6 +542,7 @@ test("large compact UI recording survives export, import and rerun", async ({
 	await reran.finished();
 	await expect(page.getByRole("status")).toContainText(
 		"All declared expectations matched",
+		{ timeout: 15000 },
 	);
 	await expect(pages).toContainText(/Rows 1–20 of \d+/);
 });

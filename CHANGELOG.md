@@ -4,6 +4,10 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow up to 15 seconds for large-recording completion messages in the CPU-throttled UI test, including on slower macOS Intel runners.
+
 ## [0.3.0] - 2026-11-11
 
 ### Fixed
