@@ -21,6 +21,7 @@ fn operation(id: &str, c: &str, sql: &str) -> Operation {
         id: id.into(),
         connection: c.into(),
         kind: OperationKind::Sql,
+        copy: None,
         sql: sql.into(),
         params: vec![],
         after: vec![],
@@ -48,6 +49,237 @@ async fn all_runbooks_and_portable_recordings() {
         replay.replay().await.unwrap();
         replay.shutdown().await;
     }
+}
+
+fn wal_copy_scenario() -> Scenario {
+    scenarios::builtins()
+        .into_iter()
+        .find(|s| s.name == "WAL · copy without the log")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn wal_copy_checks_actual_rows_before_and_after_checkpoint() {
+    let engine = Engine::new(wal_copy_scenario(), binary()).await.unwrap();
+    let early_checkpoint = engine
+        .scenario
+        .operations
+        .iter()
+        .find(|op| op.id == "control_checkpoint")
+        .unwrap();
+    let early = engine.submit(early_checkpoint.clone()).await.unwrap_err();
+    assert!(early.contains("snapshot_rows/completed"), "{early}");
+    engine.replay().await.unwrap();
+    let record = engine.recording().await;
+    let completed = |id: &str| {
+        record
+            .events
+            .iter()
+            .find(|ev| ev.operation == id && ev.kind == "completed")
+            .unwrap()
+    };
+    let commit = completed("commit");
+    assert_eq!(commit.data["transaction"], "none");
+    assert_eq!(commit.data["autocommit"], true);
+    assert!(
+        commit.data["files_at_completion"]["wal_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let baseline = json!([Cell::Integer("1".into()), Cell::Text("baseline".into())]);
+    let committed = json!([Cell::Integer("2".into()), Cell::Text("committed".into())]);
+    let both = json!([baseline, committed]);
+    let live = completed("live_rows");
+    assert_eq!(live.data["result"]["rows"], both);
+    let raw = completed("main_before_checkpoint");
+    let snapshot = completed("snapshot");
+    assert!(commit.seq < live.seq && live.seq < raw.seq && raw.seq < snapshot.seq);
+    assert!(snapshot.seq < completed("main_integrity").seq);
+    assert!(snapshot.seq < completed("snapshot_integrity").seq);
+    for (prefix, copy, rows) in [
+        ("main", "main_before_checkpoint", json!([baseline])),
+        ("snapshot", "snapshot", both.clone()),
+        ("control", "main_after_checkpoint", both),
+    ] {
+        let integrity = completed(&format!("{prefix}_integrity"));
+        let reading = completed(&format!("{prefix}_rows"));
+        for event in [integrity, reading] {
+            assert_eq!(event.data["copy_opened"], true);
+            assert_eq!(event.data["copy"], copy);
+            assert_eq!(event.data["assertion"]["matched"], true);
+        }
+        assert_eq!(
+            integrity.data["result"]["rows"],
+            json!([[Cell::Text("ok".into())]])
+        );
+        assert_eq!(reading.data["result"]["rows"], rows);
+    }
+    let checkpoint = completed("control_checkpoint");
+    assert_eq!(checkpoint.data["assertion"]["matched"], true);
+    assert!(checkpoint.seq < completed("main_after_checkpoint").seq);
+    let counts = &checkpoint.data["result"]["rows"][0];
+    assert_eq!(counts[0]["value"], "0");
+    assert!(counts[1]["value"].as_str().unwrap().parse::<u64>().unwrap() > 0);
+    assert_eq!(counts[1], counts[2]);
+    assert_eq!(
+        std::fs::read_dir(engine.directory.path().join("copies"))
+            .unwrap()
+            .count(),
+        3
+    );
+    assert!(record.environment["sqlite_source_id"].is_string());
+    record.validate().unwrap();
+    engine.stop().await;
+    assert!(!engine.directory.path().exists());
+}
+
+#[tokio::test]
+async fn wal_copy_never_runs_control_after_partial_checkpoint() {
+    let mut scenario = wal_copy_scenario();
+    scenario.settings.connections = 3;
+    scenario.settings.busy_ms = 0;
+    let begin = scenario
+        .operations
+        .iter()
+        .position(|op| op.id == "begin")
+        .unwrap();
+    let done = |id: &str| {
+        vec![Dependency {
+            operation: id.into(),
+            event: "completed".into(),
+        }]
+    };
+    let mut reader = operation("reader_begin", "C", "BEGIN");
+    reader.after = done("baseline_checkpoint");
+    let mut pin = operation("reader_pin", "C", "SELECT id FROM entry");
+    pin.after = done("reader_begin");
+    scenario.operations[begin].after = done("reader_pin");
+    scenario.operations.splice(begin..begin, [reader, pin]);
+
+    let engine = Engine::new(scenario, binary()).await.unwrap();
+    let error = engine.replay().await.unwrap_err();
+    assert!(
+        error
+            .contains("Incomplete experiment: Expected complete checkpoint for control_checkpoint"),
+        "{error}"
+    );
+    let checkpoint = engine.wait_terminal("control_checkpoint").await.unwrap();
+    assert_eq!(checkpoint.kind, "completed");
+    assert_eq!(checkpoint.data["assertion"]["matched"], false);
+    let counts = &checkpoint.data["result"]["rows"][0];
+    assert_eq!(counts[0]["value"], "1");
+    assert_ne!(counts[1], counts[2]);
+    let record = engine.recording().await;
+    assert!(
+        !record
+            .events
+            .iter()
+            .any(|event| event.operation == "main_after_checkpoint")
+    );
+    record.validate().unwrap();
+    engine.stop().await;
+    assert!(!engine.directory.path().exists());
+}
+
+#[tokio::test]
+async fn wal_copy_creation_failures_are_recorded_and_cleaned_up() {
+    for id in ["main_before_checkpoint", "snapshot"] {
+        let scenario = wal_copy_scenario();
+        let slot = scenario.initial.len()
+            + scenario
+                .operations
+                .iter()
+                .position(|op| op.id == id)
+                .unwrap();
+        let engine = Engine::new(scenario, binary()).await.unwrap();
+        let copies = engine.directory.path().join("copies");
+        std::fs::create_dir(&copies).unwrap();
+        let blocked = copies.join(slot.to_string());
+        std::fs::write(&blocked, b"injected copy directory failure").unwrap();
+        let error = engine.replay().await.unwrap_err();
+        assert!(error.starts_with("Incomplete experiment"), "{error}");
+        assert!(
+            error.contains(&format!("Could not create copy {id}")),
+            "{error}"
+        );
+        let failed = engine.wait_terminal(id).await.unwrap();
+        assert_eq!(failed.kind, "failed");
+        assert_eq!(failed.data["error"]["category"], "copy");
+        assert!(failed.data.get("copy_bytes").is_none());
+        assert!(blocked.is_file());
+        let record = engine.recording().await;
+        assert!(
+            !record
+                .events
+                .iter()
+                .any(|event| event.operation == "main_integrity")
+        );
+        record.validate().unwrap();
+        engine.stop().await;
+        assert!(!engine.directory.path().exists());
+
+        let saved: Recording = serde_json::from_str(&record.to_json().unwrap()).unwrap();
+        let replay = Engine::new(saved.scenario, binary()).await.unwrap();
+        replay.replay().await.unwrap();
+        let control = replay.wait_terminal("control_rows").await.unwrap();
+        assert_eq!(control.data["assertion"]["matched"], true);
+        replay.stop().await;
+        assert!(!replay.directory.path().exists());
+    }
+}
+
+#[tokio::test]
+async fn wal_copy_checks_use_the_existing_sql_sandbox_and_open_without_create() {
+    let mut scenario = blank();
+    scenario.format_version = FORMAT;
+    let slot = scenario.initial.len();
+    let engine = Engine::new(scenario, binary()).await.unwrap();
+    assert_eq!(
+        life(&engine, "snapshot", "A", OperationKind::VacuumInto)
+            .await
+            .kind,
+        "completed"
+    );
+
+    let outside_directory = tempfile::tempdir().unwrap();
+    let outside = outside_directory.path().join("outside.db");
+    for (id, sql, copy) in [
+        ("vacuum_live", "VACUUM INTO ?1", None),
+        ("vacuum_copy", "VACUUM INTO ?1", Some("snapshot".into())),
+        ("attach_copy", "ATTACH ?1 AS other", Some("snapshot".into())),
+    ] {
+        let mut op = operation(id, "A", sql);
+        op.copy = copy;
+        op.params = vec![Cell::Text(outside.to_string_lossy().into_owned())];
+        engine.submit(op).await.unwrap();
+        let failed = engine.wait_terminal(id).await.unwrap();
+        assert_eq!(failed.kind, "failed");
+        assert_eq!(failed.data["error"]["extended"], 23);
+    }
+    assert!(!outside.exists());
+    let target = engine
+        .directory
+        .path()
+        .join("copies")
+        .join(slot.to_string())
+        .join("copy.db");
+    std::fs::remove_file(&target).unwrap();
+    let mut check = operation("check_missing", "B", "PRAGMA integrity_check");
+    check.copy = Some("snapshot".into());
+    engine.submit(check).await.unwrap();
+    let failed = engine.wait_terminal("check_missing").await.unwrap();
+    assert_eq!(failed.kind, "failed");
+    assert_eq!(failed.data["copy_opened"], false);
+    assert!(
+        failed.data["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Could not open copy snapshot")
+    );
+    assert!(!target.exists());
+    engine.stop().await;
+    assert!(!engine.directory.path().exists());
 }
 
 #[test]
@@ -893,7 +1125,12 @@ fn alive(pid: u64) -> bool {
 #[tokio::test]
 async fn crash_reopen_scenarios_hold_in_wal_and_rollback_journal_modes() {
     for mode in ["wal", "delete"] {
-        for mut scenario in scenarios::builtins().split_off(12) {
+        for mut scenario in scenarios::builtins().into_iter().filter(|scenario| {
+            scenario
+                .operations
+                .iter()
+                .any(|op| op.kind == OperationKind::Crash)
+        }) {
             scenario.settings.journal_mode = mode.into();
             let label = format!("{} ({mode})", scenario.name);
             let e = Engine::new(scenario.clone(), binary()).await.unwrap();

@@ -2,9 +2,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Version 1 has SQL steps only. Version 2 adds typed `crash` and `reopen` steps.
 pub const FORMAT_SQL: u32 = 1;
-pub const FORMAT: u32 = 2;
+pub const FORMAT_LIFECYCLE: u32 = 2;
+pub const FORMAT: u32 = 3;
 pub const MAX_ARTIFACT: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -35,7 +35,7 @@ impl Default for Settings {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dependency {
     pub operation: String,
@@ -50,20 +50,30 @@ pub enum OperationKind {
     Crash,
     /// Start a new worker process on the same database file.
     Reopen,
+    CopyMain,
+    VacuumInto,
 }
 impl OperationKind {
     pub fn is_sql(&self) -> bool {
         *self == Self::Sql
+    }
+    pub fn is_lifecycle(self) -> bool {
+        matches!(self, Self::Crash | Self::Reopen)
+    }
+    pub fn is_copy(self) -> bool {
+        matches!(self, Self::CopyMain | Self::VacuumInto)
     }
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sql => "sql",
             Self::Crash => "crash",
             Self::Reopen => "reopen",
+            Self::CopyMain => "copy_main",
+            Self::VacuumInto => "vacuum_into",
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
     pub id: String,
@@ -71,6 +81,9 @@ pub struct Operation {
     // Omitted for SQL steps, so version 1 artifacts keep their exact shape.
     #[serde(default, skip_serializing_if = "OperationKind::is_sql")]
     pub kind: OperationKind,
+    /// A SQL step can read the copy produced by an earlier operation ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<String>,
     #[serde(default)]
     pub sql: String,
     #[serde(default)]
@@ -81,6 +94,17 @@ pub struct Operation {
     pub expect: Value,
     #[serde(default)]
     pub note: String,
+}
+impl Operation {
+    pub fn required_format(&self) -> u32 {
+        if self.kind.is_copy() || self.copy.is_some() {
+            FORMAT
+        } else if self.kind.is_lifecycle() {
+            FORMAT_LIFECYCLE
+        } else {
+            FORMAT_SQL
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,14 +148,15 @@ pub fn environment() -> Value {
         .collect();
     json!({"txnstage":env!("CARGO_PKG_VERSION"),"sqlite_version":rusqlite::version(),"sqlite_source_id":source,"compile_options":opts,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"busy_policy":"instrumented fixed 10ms retry; not sqlite3_busy_timeout"})
 }
-pub fn validate_operation(op: &Operation) -> Result<(), String> {
-    if op.id.is_empty()
-        || op.id.len() > 80
-        || !op
-            .id
+fn valid_id(id: &str) -> bool {
+    (1..=80).contains(&id.len())
+        && id
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-    {
+}
+
+pub fn validate_operation(op: &Operation) -> Result<(), String> {
+    if !valid_id(&op.id) {
         return Err(
             "Operation ID must be 1–80 ASCII letters, digits, hyphens or underscores".into(),
         );
@@ -149,13 +174,17 @@ pub fn validate_operation(op: &Operation) -> Result<(), String> {
         return Err("Operation metadata exceeds limits".into());
     }
     if !op.kind.is_sql() {
-        if !op.sql.is_empty() || !op.params.is_empty() || !op.expect.is_null() {
-            return Err(
-                "crash and reopen steps take no SQL, parameters or expectation; assert with a following SQL step"
-                    .into(),
-            );
+        if op.copy.is_some() || !op.sql.is_empty() || !op.params.is_empty() || !op.expect.is_null()
+        {
+            return Err(format!(
+                "{} takes no copy reference, SQL, parameters or expectation",
+                op.kind.as_str()
+            ));
         }
         return Ok(());
+    }
+    if op.copy.as_deref().is_some_and(|id| !valid_id(id)) {
+        return Err("Copy reference must be an operation ID".into());
     }
     if op.sql.is_empty() || op.sql.len() > 65536 || op.sql.contains('\0') || op.params.len() > 100 {
         return Err("SQL limit: 64 KiB, one statement, no NUL; at most 100 parameters".into());
@@ -210,7 +239,7 @@ pub fn validate_operation(op: &Operation) -> Result<(), String> {
 }
 impl Scenario {
     pub fn validate(&self) -> Result<(), String> {
-        if ![FORMAT_SQL, FORMAT].contains(&self.format_version) {
+        if !(FORMAT_SQL..=FORMAT).contains(&self.format_version) {
             return Err("Unsupported scenario format_version".into());
         }
         if self.name.len() > 120 || self.description.len() > 4096 {
@@ -243,14 +272,30 @@ impl Scenario {
         // and a declared terminal dependency makes the process state at each step known.
         let mut previous: std::collections::HashMap<&str, &Operation> = Default::default();
         let mut closed = std::collections::HashSet::new();
+        let mut copies = std::collections::HashSet::new();
         for op in &self.operations {
             validate_operation(op)?;
-            if !op.kind.is_sql() && self.format_version < FORMAT {
-                return Err("crash and reopen steps require format_version 2".into());
+            if self.format_version < op.required_format() {
+                return Err(format!(
+                    "Step {} requires format_version {}",
+                    op.id,
+                    op.required_format()
+                ));
+            }
+            if let Some(copy) = op.copy.as_deref()
+                && !copies.contains(copy)
+            {
+                return Err(format!(
+                    "Step {} must reference an earlier copy operation",
+                    op.id
+                ));
+            }
+            if op.kind.is_copy() {
+                copies.insert(op.id.as_str());
             }
             let c = op.connection.as_str();
             if let Some(p) = previous.get(c)
-                && !(p.kind.is_sql() && op.kind.is_sql())
+                && (p.kind.is_lifecycle() || op.kind.is_lifecycle())
             {
                 let Some(d) = op
                     .after
@@ -266,14 +311,14 @@ impl Scenario {
                     match p.kind {
                         OperationKind::Crash => closed.insert(c),
                         OperationKind::Reopen => closed.remove(c),
-                        OperationKind::Sql => false,
+                        _ => false,
                     };
                 }
             }
             match (op.kind, closed.contains(c)) {
-                (OperationKind::Sql, true) => {
+                (OperationKind::Reopen, false) => {
                     return Err(format!(
-                        "Step {} runs SQL on connection {c} while it is closed; add a reopen step first",
+                        "Step {} reopens connection {c}, which is open; reopen follows a completed crash of the same connection",
                         op.id
                     ));
                 }
@@ -283,9 +328,9 @@ impl Scenario {
                         op.id
                     ));
                 }
-                (OperationKind::Reopen, false) => {
+                (kind, true) if kind != OperationKind::Reopen => {
                     return Err(format!(
-                        "Step {} reopens connection {c}, which is open; reopen follows a completed crash of the same connection",
+                        "Step {} uses connection {c} while it is closed; add a reopen step first",
                         op.id
                     ));
                 }
@@ -328,7 +373,7 @@ impl Recording {
         serde_json::to_string(self).map_err(|e| e.to_string())
     }
     pub fn validate(&self) -> Result<(), String> {
-        if ![FORMAT_SQL, FORMAT].contains(&self.format_version)
+        if !(FORMAT_SQL..=FORMAT).contains(&self.format_version)
             || self.format_version != self.scenario.format_version
             || self.events.len() > 20000
             || !self.environment.is_object()

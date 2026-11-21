@@ -31,6 +31,25 @@ export function EventDetail({
 		event.data.settings_reapplied,
 	].filter((v): v is string => typeof v === "string");
 	const facts: [string, unknown][] = [
+		["Copy", event.data.copy],
+		[
+			"Open",
+			event.data.copy_opened === undefined
+				? undefined
+				: event.data.copy_opened
+					? "Opened independently, read-only"
+					: "Could not open the copy",
+		],
+		[
+			"Copy size",
+			event.data.copy_bytes === undefined
+				? undefined
+				: `${event.data.copy_bytes} B`,
+		],
+		[
+			"Expectation",
+			event.data.assertion?.matched ? "Passed" : event.data.assertion?.message,
+		],
 		["Lifecycle", event.data.lifecycle],
 		["Worker generation", event.data.generation],
 		[

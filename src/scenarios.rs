@@ -3,6 +3,7 @@ use crate::model::*;
 use serde_json::{Value, json};
 mod crash_reopen;
 mod fk_rebuild;
+mod wal_copy;
 fn op(
     id: &str,
     c: &str,
@@ -15,6 +16,7 @@ fn op(
         id: id.into(),
         connection: c.into(),
         kind: OperationKind::Sql,
+        copy: None,
         sql: sql.into(),
         params: vec![],
         after,
@@ -348,5 +350,6 @@ pub fn builtins() -> Vec<Scenario> {
     let mut scenarios = vec![snapshot, writers, zero, deferred, immediate, checkpoint];
     scenarios.extend(fk_rebuild::builtins());
     scenarios.extend(crash_reopen::builtins());
+    scenarios.push(wal_copy::scenario());
     scenarios
 }

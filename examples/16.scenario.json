@@ -1,0 +1,407 @@
+{
+  "format_version": 3,
+  "name": "WAL · copy without the log",
+  "description": "A main-file copy can pass integrity_check while missing a committed row still in the WAL. Compare it with a VACUUM INTO snapshot and with a main-file copy made after a complete checkpoint. https://www.sqlite.org/howtocorrupt.html#_mispairing_database_files_and_hot_journals_",
+  "settings": {
+    "journal_mode": "wal",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 2
+  },
+  "initial": [
+    "CREATE TABLE entry(id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+    "INSERT INTO entry VALUES (1, 'baseline')"
+  ],
+  "operations": [
+    {
+      "id": "journal_mode",
+      "connection": "A",
+      "sql": "PRAGMA journal_mode",
+      "params": [],
+      "after": [],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "wal"
+            }
+          ]
+        ]
+      },
+      "note": "Confirm the working database uses WAL."
+    },
+    {
+      "id": "autocheckpoint",
+      "connection": "A",
+      "sql": "PRAGMA wal_autocheckpoint",
+      "params": [],
+      "after": [
+        {
+          "operation": "journal_mode",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Confirm automatic checkpoints are disabled on the writer."
+    },
+    {
+      "id": "baseline_checkpoint",
+      "connection": "A",
+      "sql": "PRAGMA main.wal_checkpoint(TRUNCATE)",
+      "params": [],
+      "after": [
+        {
+          "operation": "autocheckpoint",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "full_checkpoint": true,
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            },
+            {
+              "type": "integer",
+              "value": "0"
+            }
+          ]
+        ]
+      },
+      "note": "Confirm the schema and baseline row are in the main file and the WAL is truncated."
+    },
+    {
+      "id": "begin",
+      "connection": "A",
+      "sql": "BEGIN IMMEDIATE",
+      "params": [],
+      "after": [
+        {
+          "operation": "baseline_checkpoint",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Start a write transaction."
+    },
+    {
+      "id": "insert",
+      "connection": "A",
+      "sql": "INSERT INTO entry VALUES (2, 'committed')",
+      "params": [],
+      "after": [
+        {
+          "operation": "begin",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Add the second row."
+    },
+    {
+      "id": "commit",
+      "connection": "A",
+      "sql": "COMMIT",
+      "params": [],
+      "after": [
+        {
+          "operation": "insert",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Wait for COMMIT to complete and keep A open."
+    },
+    {
+      "id": "live_rows",
+      "connection": "B",
+      "sql": "SELECT id, label FROM entry ORDER BY id",
+      "params": [],
+      "after": [
+        {
+          "operation": "commit",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            },
+            {
+              "type": "text",
+              "value": "baseline"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            },
+            {
+              "type": "text",
+              "value": "committed"
+            }
+          ]
+        ]
+      },
+      "note": "A fresh read on B confirms both rows in the working database."
+    },
+    {
+      "id": "main_before_checkpoint",
+      "connection": "A",
+      "kind": "copy_main",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "live_rows",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Copy the main database file into its own directory. Leave the WAL and SHM behind."
+    },
+    {
+      "id": "snapshot",
+      "connection": "A",
+      "kind": "vacuum_into",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "main_before_checkpoint",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Take a consistent VACUUM INTO snapshot of the same committed state."
+    },
+    {
+      "id": "main_integrity",
+      "connection": "B",
+      "copy": "main_before_checkpoint",
+      "sql": "PRAGMA integrity_check",
+      "params": [],
+      "after": [
+        {
+          "operation": "snapshot",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "ok"
+            }
+          ]
+        ]
+      },
+      "note": "Open the copy read-only and check its structural integrity."
+    },
+    {
+      "id": "main_rows",
+      "connection": "B",
+      "copy": "main_before_checkpoint",
+      "sql": "SELECT id, label FROM entry ORDER BY id",
+      "params": [],
+      "after": [
+        {
+          "operation": "main_integrity",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            },
+            {
+              "type": "text",
+              "value": "baseline"
+            }
+          ]
+        ]
+      },
+      "note": "The exact row check expects only the baseline in the main-file copy."
+    },
+    {
+      "id": "snapshot_integrity",
+      "connection": "B",
+      "copy": "snapshot",
+      "sql": "PRAGMA integrity_check",
+      "params": [],
+      "after": [
+        {
+          "operation": "main_rows",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "ok"
+            }
+          ]
+        ]
+      },
+      "note": "Open the copy read-only and check its structural integrity."
+    },
+    {
+      "id": "snapshot_rows",
+      "connection": "B",
+      "copy": "snapshot",
+      "sql": "SELECT id, label FROM entry ORDER BY id",
+      "params": [],
+      "after": [
+        {
+          "operation": "snapshot_integrity",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            },
+            {
+              "type": "text",
+              "value": "baseline"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            },
+            {
+              "type": "text",
+              "value": "committed"
+            }
+          ]
+        ]
+      },
+      "note": "The exact row check expects both rows in the snapshot."
+    },
+    {
+      "id": "control_checkpoint",
+      "connection": "A",
+      "sql": "PRAGMA main.wal_checkpoint(FULL)",
+      "params": [],
+      "after": [
+        {
+          "operation": "snapshot_rows",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "full_checkpoint": true
+      },
+      "note": "Confirm all WAL frames were checkpointed before making the control copy."
+    },
+    {
+      "id": "main_after_checkpoint",
+      "connection": "A",
+      "kind": "copy_main",
+      "sql": "",
+      "params": [],
+      "after": [
+        {
+          "operation": "control_checkpoint",
+          "event": "completed"
+        }
+      ],
+      "expect": null,
+      "note": "Copy the main file again after the complete checkpoint."
+    },
+    {
+      "id": "control_integrity",
+      "connection": "B",
+      "copy": "main_after_checkpoint",
+      "sql": "PRAGMA integrity_check",
+      "params": [],
+      "after": [
+        {
+          "operation": "main_after_checkpoint",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "ok"
+            }
+          ]
+        ]
+      },
+      "note": "Open the copy read-only and check its structural integrity."
+    },
+    {
+      "id": "control_rows",
+      "connection": "B",
+      "copy": "main_after_checkpoint",
+      "sql": "SELECT id, label FROM entry ORDER BY id",
+      "params": [],
+      "after": [
+        {
+          "operation": "control_integrity",
+          "event": "completed"
+        }
+      ],
+      "expect": {
+        "rows": [
+          [
+            {
+              "type": "integer",
+              "value": "1"
+            },
+            {
+              "type": "text",
+              "value": "baseline"
+            }
+          ],
+          [
+            {
+              "type": "integer",
+              "value": "2"
+            },
+            {
+              "type": "text",
+              "value": "committed"
+            }
+          ]
+        ]
+      },
+      "note": "The exact row check expects both rows in the control copy."
+    }
+  ]
+}

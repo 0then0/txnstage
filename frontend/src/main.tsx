@@ -9,6 +9,8 @@ import {
 	closedInEvents,
 	type Event,
 	eventLabel,
+	isCopyStep,
+	isSqlStep,
 	type Lifecycle,
 	lifecycleOf,
 	type Operation,
@@ -54,6 +56,7 @@ const experimentGroups = [
 	{ title: "Snapshots, writers & checkpoints", from: 0, to: 6 },
 	{ title: "FK cascade & data preservation", from: 6, to: 12 },
 	{ title: "Process crash & reopen", from: 12, to: 15 },
+	{ title: "WAL & database copies", from: 15, to: 16 },
 ];
 const connections: Conn[] = ["A", "B", "C"];
 function editorValues(s: Scenario, used: string[] = []) {
@@ -64,7 +67,7 @@ function editorValues(s: Scenario, used: string[] = []) {
 		const o = s.operations.find(
 			(o) => o.connection === c && !used.includes(o.id),
 		);
-		text[c] = o && !lifecycleOf(o) ? o.sql : "SELECT 1";
+		text[c] = o && isSqlStep(o) ? o.sql : "SELECT 1";
 		ps[c] = JSON.stringify(o?.params ?? []);
 		selectedIds[c] = o?.id ?? "";
 	}
@@ -262,43 +265,50 @@ function App() {
 	async function execute(c: Conn, supplied?: Operation) {
 		if (!state || !draft || recording) return;
 		const gen = generation.current;
-		// A selected crash/reopen step is run by its own button, never as SQL.
+		// Crash and reopen have their own controls.
 		const original =
 			supplied ??
 			draft.operations.find((o) => o.id === ids[c] && !lifecycleOf(o));
-		const text = supplied?.sql ?? sql[c],
-			bound = supplied?.params ?? parseParams(params[c]);
-		const op: Operation = {
-			id:
-				original && !state.operations.some((o) => o.id === original.id)
-					? original.id
-					: `manual_${crypto.randomUUID()}`,
-			connection: c,
-			sql: text,
-			params: bound,
-			after: [],
-			expect:
-				original?.sql === text &&
-				JSON.stringify(original.params) === JSON.stringify(bound)
-					? original.expect
-					: null,
-			note: original?.note ?? "Manual operation",
-		};
+		const copying = original && isCopyStep(original);
+		const used = state.operations.map((o) => o.id);
+		const firstRun = original && !used.includes(original.id);
+		const ordered = firstRun && draft.format_version >= 3;
+		if (copying && !firstRun) return;
+		if (original && (copying || ordered) && !ready(original, state.events))
+			return;
+		const text = copying ? "" : (supplied?.sql ?? sql[c]),
+			bound = copying ? [] : (supplied?.params ?? parseParams(params[c]));
+		const op: Operation = copying
+			? original
+			: {
+					id: firstRun ? original.id : `manual_${crypto.randomUUID()}`,
+					connection: c,
+					copy: original?.copy,
+					sql: text,
+					params: bound,
+					after: ordered ? original.after : [],
+					expect:
+						original?.sql === text &&
+						JSON.stringify(original.params) === JSON.stringify(bound)
+							? original.expect
+							: null,
+					note: original?.note ?? "Manual operation",
+				};
 		await api("execute", op);
 		if (!current(gen)) return;
 		// The "fresh database" notice no longer describes the experiment.
 		setNotice("");
 		await refresh();
 		if (!current(gen)) return;
-		advance(draft, c, [...state.operations.map((o) => o.id), op.id], text);
+		advance(draft, c, [...used, op.id], copying ? sql[c] : text);
 	}
 	function advance(s: Scenario, c: Conn, used: string[], text?: string) {
 		const next = s.operations.find(
 			(o) => o.connection === c && !used.includes(o.id),
 		);
 		setIds((v) => ({ ...v, [c]: next?.id ?? "" }));
-		// A lifecycle step has no SQL; keep what the editor already shows.
-		if (text === undefined || (next && lifecycleOf(next))) return;
+		// Keep the editor contents when advancing to a typed step.
+		if (text === undefined || (next && !isSqlStep(next))) return;
 		setSql((v) => ({ ...v, [c]: next?.sql ?? text }));
 		setParams((v) => ({ ...v, [c]: JSON.stringify(next?.params ?? []) }));
 	}
@@ -396,18 +406,27 @@ function App() {
 		).length,
 		activeCount = Object.keys(state.active).length,
 		env = recording?.environment ?? state.environment;
+	const incomplete =
+		draft.format_version >= 3 &&
+		visible.find(
+			(e) =>
+				terminal(e.kind) &&
+				(e.data.assertion?.matched === false ||
+					(e.kind !== "completed" && e.data.assertion?.matched !== true)) &&
+				draft.operations.some((o) => o.id === e.operation),
+		);
 	function selectOp(o: Operation) {
 		const c = o.connection as Conn;
 		setIds((v) => ({ ...v, [c]: o.id }));
-		if (lifecycleOf(o)) return;
+		if (!isSqlStep(o)) return;
 		setSql((v) => ({ ...v, [c]: o.sql }));
 		setParams((v) => ({ ...v, [c]: JSON.stringify(o.params) }));
 	}
 	function editSql(c: Conn, text: string) {
 		setSql((v) => ({ ...v, [c]: text }));
 		const chosen = draft?.operations.find((o) => o.id === ids[c]);
-		// Typing SQL while a crash/reopen step is selected starts custom SQL.
-		if (chosen && lifecycleOf(chosen)) setIds((v) => ({ ...v, [c]: "" }));
+		// Typing SQL while a typed step is selected starts custom SQL.
+		if (chosen && !isSqlStep(chosen)) setIds((v) => ({ ...v, [c]: "" }));
 		else if (ids[c])
 			setDraft((s) =>
 				s
@@ -597,6 +616,16 @@ function App() {
 							</button>
 						</div>
 					)}
+					{incomplete && !error && (
+						<div role="alert" className="banner error">
+							<strong>Incomplete experiment</strong> {incomplete.operation} ·{" "}
+							{String(
+								incomplete.data.error?.message ??
+									incomplete.data.assertion?.message ??
+									incomplete.kind,
+							)}
+						</div>
+					)}
 					{notice && (
 						<div role="status" className="banner">
 							{notice}
@@ -716,7 +745,9 @@ function App() {
 								<p>
 									{activeCount
 										? "Waiting for an observed event. Other connections remain available."
-										: "All steps observed. Select a step to edit SQL, or Reset to start again."}
+										: finished < draft.operations.length
+											? "Waiting for a required step to pass."
+											: "All steps observed. Select a step to edit SQL, or Reset to start again."}
 								</p>
 							)}
 						</div>
@@ -858,10 +889,20 @@ function App() {
 								workerGeneration = recording
 									? undefined
 									: state.connections?.[c]?.generation,
-								chosenCrash = draft.operations.find(
-									(o) =>
-										o.id === ids[c] && o.kind === "crash" && !used.has(o.id),
-								),
+								chosen = draft.operations.find((o) => o.id === ids[c]),
+								chosenCrash =
+									chosen?.kind === "crash" && !used.has(chosen.id)
+										? chosen
+										: undefined,
+								chosenCopy = chosen && isCopyStep(chosen),
+								stepBlocked =
+									!!chosen &&
+									(chosenCopy
+										? used.has(chosen.id) || !ready(chosen, events)
+										: draft.format_version >= 3 &&
+											isSqlStep(chosen) &&
+											!used.has(chosen.id) &&
+											!ready(chosen, events)),
 								blocked =
 									!!recording ||
 									state.stopped ||
@@ -948,7 +989,12 @@ function App() {
 										value={sql[c]}
 										onChange={(v) => editSql(c, v)}
 										onRun={() => {
-											if (!runningId && !blocked && phase === "open")
+											if (
+												!runningId &&
+												!blocked &&
+												!stepBlocked &&
+												phase === "open"
+											)
 												action(() => execute(c));
 										}}
 									/>
@@ -970,7 +1016,7 @@ function App() {
 															? {
 																	...s,
 																	operations: s.operations.map((o) =>
-																		o.id === ids[c] && !lifecycleOf(o)
+																		o.id === ids[c] && isSqlStep(o)
 																			? { ...o, params: parsed, expect: null }
 																			: o,
 																	),
@@ -992,7 +1038,11 @@ function App() {
 													? "Closed · reopen to run SQL"
 													: chosenCrash
 														? `Step ${chosenCrash.id} · use Crash ${c}`
-														: "⌘ / Ctrl + Enter")}
+														: chosenCopy
+															? stepLabel(chosen)
+															: stepBlocked
+																? "Waiting for a required step"
+																: "⌘ / Ctrl + Enter")}
 										</span>
 										<div className="run-actions">
 											{phase === "closed" ? (
@@ -1029,7 +1079,7 @@ function App() {
 											) : (
 												<button
 													type="button"
-													disabled={blocked || phase !== "open"}
+													disabled={blocked || stepBlocked || phase !== "open"}
 													aria-label={`Run ${c}`}
 													onClick={() => action(() => execute(c))}
 												>
@@ -1055,7 +1105,9 @@ function App() {
 														? last.kind
 														: last.data.error.category === "infrastructure"
 															? "Infrastructure error"
-															: "SQL error"}{" "}
+															: last.data.error.category === "copy"
+																? "Copy error"
+																: "SQL error"}{" "}
 													{last.data.error.extended !== undefined
 														? `· ${last.data.error.extended}`
 														: ""}
@@ -1086,6 +1138,10 @@ function App() {
 														: ""}
 												</p>
 											</>
+										) : last?.data.copy_bytes !== undefined ? (
+											<p className="empty-result">
+												Copy created · {String(last.data.copy_bytes)} B
+											</p>
 										) : last?.data.lifecycle ? (
 											<p className="empty-result">
 												{last.data.lifecycle === "crash"
@@ -1161,12 +1217,16 @@ function App() {
 												? "historical observation"
 												: expected
 													? "expected SQL error"
-													: (ev?.kind ??
-														(recording
-															? "not recorded"
-															: runnable
-																? "ready"
-																: "await event"))}
+													: ev?.data.assertion?.matched === true
+														? "check passed"
+														: ev?.data.assertion?.matched === false
+															? "check failed"
+															: (ev?.kind ??
+																(recording
+																	? "not recorded"
+																	: runnable
+																		? "ready"
+																		: "await event"))}
 										</span>
 									</button>
 								);
@@ -1179,7 +1239,9 @@ function App() {
 									? `Next ready: ${next.connection} · ${next.note}`
 									: activeCount
 										? "An operation is in flight. Other connections remain available."
-										: "All steps observed. Edit SQL to explore, or reset for a fresh database."}
+										: finished < draft.operations.length
+											? "Waiting for a required step to pass."
+											: "All steps observed. Edit SQL to explore, or reset for a fresh database."}
 						</p>
 					</section>
 					<section className="observations" aria-label="Observed events">

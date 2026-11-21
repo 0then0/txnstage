@@ -2,6 +2,7 @@
 //! admits operations, records events in observation order, and handles
 //! cancellation, planned crash and reopen, replay and cleanup.
 use crate::model::*;
+use crate::worker::{STORAGE_LIMIT_BYTES, copied_bytes, file_bytes};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -216,6 +217,7 @@ impl Engine {
                 id: format!("seed_{i}"),
                 connection: "A".into(),
                 kind: OperationKind::Sql,
+                copy: None,
                 sql: sql.clone(),
                 params: vec![],
                 after: vec![],
@@ -299,6 +301,18 @@ impl Engine {
             data["result"]["recording_limit"] =
                 json!("5 MiB event budget: row previews omitted; statement was fully drained");
         }
+        if terminal(kind)
+            && self.scenario.format_version == FORMAT
+            && let Some(op) = s
+                .operations
+                .iter()
+                .find(|o| o.id == operation && !o.expect.is_null())
+        {
+            data["assertion"] = match check_expectation(op, kind, &data, true) {
+                Ok(()) => json!({"matched":true}),
+                Err(message) => json!({"matched":false,"message":message}),
+            };
+        }
         s.event_bytes += serde_json::to_vec(&data).unwrap_or_default().len() + 256;
         s.events.push(Event {
             seq: s.events.len() as u64 + 1,
@@ -322,7 +336,7 @@ impl Engine {
         if s.generation.get(connection) != Some(&generation)
             || s.phase(connection) == Phase::Closed
             // Lifecycle operations are reported by the coordinator only.
-            || s.kind(operation).is_some_and(|k| !k.is_sql())
+            || s.kind(operation).is_some_and(OperationKind::is_lifecycle)
         {
             return;
         }
@@ -374,12 +388,13 @@ impl Engine {
         );
     }
     pub fn files(&self) -> Value {
-        let size = |name: &str| {
-            std::fs::metadata(self.directory.path().join(name))
-                .map(|m| m.len())
-                .unwrap_or(0)
-        };
-        json!({"db_bytes":size("experiment.db"),"wal_bytes":size("experiment.db-wal"),"journal_bytes":size("experiment.db-journal"),"measurement":"filesystem stat only; no SQL or checkpoint","elapsed_ms":self.started.elapsed().as_millis() as u64})
+        let directory = self.directory.path();
+        let size = |name: &str| file_bytes(&directory.join(name));
+        let mut files = json!({"db_bytes":size("experiment.db"),"wal_bytes":size("experiment.db-wal"),"journal_bytes":size("experiment.db-journal"),"measurement":"filesystem stat only; no SQL or checkpoint","elapsed_ms":self.started.elapsed().as_millis() as u64});
+        if let Some(bytes) = copied_bytes(directory) {
+            files["copy_bytes"] = json!(bytes);
+        }
+        files
     }
     pub async fn snapshot(&self) -> Value {
         self.snapshot_since(None, 0).await
@@ -407,37 +422,47 @@ impl Engine {
     pub async fn recording(&self) -> Recording {
         let s = self.state.lock().await;
         let mut scenario = self.scenario.clone();
-        // Reproduce observed user scheduling, including overlap barriers, independently of a template.
-        scenario.operations = s
+        let submitted: Vec<_> = s
             .operations
             .iter()
             .filter(|o| !o.id.starts_with("seed_"))
             .cloned()
             .collect();
-        for op in &mut scenario.operations {
-            if let Some(created) = s
-                .events
-                .iter()
-                .position(|e| e.operation == op.id && e.kind == "created")
-            {
-                op.after.clear();
-                for prior in &scenario_ids_before(&s.operations, &op.id) {
-                    if let Some(ev) = s.events[..created].iter().rev().find(|e| {
-                        e.operation == *prior
-                            && (terminal(&e.kind) || e.kind == "busy" || e.kind == "running")
-                    }) {
-                        op.after.push(Dependency {
-                            operation: prior.clone(),
-                            event: ev.kind.clone(),
-                        });
+        // Keep the remaining checks when execution has followed the declared prefix.
+        let retain_plan = scenario.format_version == FORMAT
+            && !submitted.is_empty()
+            && submitted.len() < scenario.operations.len()
+            && scenario.operations.starts_with(&submitted);
+        if !retain_plan {
+            scenario.operations = submitted;
+            // Reproduce the observed order and overlap of submitted operations.
+            for op in &mut scenario.operations {
+                if let Some(created) = s
+                    .events
+                    .iter()
+                    .position(|e| e.operation == op.id && e.kind == "created")
+                {
+                    op.after.clear();
+                    for prior in &scenario_ids_before(&s.operations, &op.id) {
+                        if let Some(ev) = s.events[..created].iter().rev().find(|e| {
+                            e.operation == *prior
+                                && (terminal(&e.kind) || e.kind == "busy" || e.kind == "running")
+                        }) {
+                            op.after.push(Dependency {
+                                operation: prior.clone(),
+                                event: ev.kind.clone(),
+                            });
+                        }
                     }
                 }
             }
         }
-        // Version 1 readers reject lifecycle steps, so only runs containing them move to 2.
-        if scenario.operations.iter().any(|o| !o.kind.is_sql()) {
-            scenario.format_version = FORMAT;
-        }
+        scenario.format_version = scenario
+            .operations
+            .iter()
+            .fold(scenario.format_version, |version, op| {
+                version.max(op.required_format())
+            });
         Recording {
             format_version: scenario.format_version,
             scenario,
@@ -455,7 +480,7 @@ impl Engine {
         validate_operation(&op)?;
         let w = self.worker(&op.connection).ok_or("Unknown connection")?;
         let c = &op.connection;
-        let generation = {
+        let (generation, copy_slot) = {
             let mut s = self.state.lock().await;
             if s.stopped || s.lost.contains(c) {
                 return Err("Experiment stopped or connection state lost; reset required".into());
@@ -473,11 +498,6 @@ impl Engine {
                         "Connection {c} is being reopened; wait for that operation's terminal event"
                     ));
                 }
-                (Phase::Closed, OperationKind::Sql) => {
-                    return Err(format!(
-                        "Connection {c} is closed after a planned process crash; reopen it before running SQL"
-                    ));
-                }
                 (Phase::Closed, OperationKind::Crash) => {
                     return Err(format!(
                         "Connection {c} is already closed: its worker process was terminated and reaped. Reopen it before another crash"
@@ -486,6 +506,11 @@ impl Engine {
                 (Phase::Open, OperationKind::Reopen) => {
                     return Err(format!(
                         "Connection {c} is already open; reopen is only available after a planned crash of this connection"
+                    ));
+                }
+                (Phase::Closed, kind) if kind != OperationKind::Reopen => {
+                    return Err(format!(
+                        "Connection {c} is closed after a planned process crash; reopen it before running operations"
                     ));
                 }
                 _ => {}
@@ -516,17 +541,55 @@ impl Engine {
             if s.operations.iter().any(|o| o.id == op.id) {
                 return Err("Operation ID already used; create a new operation".into());
             }
+            if self.scenario.format_version == FORMAT
+                && let Some(dependency) = op.after.iter().find(|dependency| {
+                    !s.events.iter().rev().any(|event| {
+                        event.operation == dependency.operation
+                            && event.kind == dependency.event
+                            && (event.kind != "completed"
+                                || event.data["assertion"]["matched"] != false)
+                    })
+                })
+            {
+                return Err(format!(
+                    "Step {} requires a confirmed {}/{}",
+                    op.id, dependency.operation, dependency.event
+                ));
+            }
+            let copy_slot = if op.kind.is_copy() {
+                Some(s.operations.len())
+            } else if let Some(copy) = &op.copy {
+                let slot = s
+                    .operations
+                    .iter()
+                    .position(|o| o.id == *copy && o.kind.is_copy());
+                if slot.is_none()
+                    || !s
+                        .events
+                        .iter()
+                        .any(|ev| ev.operation == *copy && ev.kind == "completed")
+                {
+                    return Err(format!("Copy operation {copy} has not completed"));
+                }
+                slot
+            } else {
+                None
+            };
             s.active.insert(op.connection.clone(), op.id.clone());
             s.operation_bytes += op_bytes;
             s.operations.push(op.clone());
-            let data = if op.kind.is_sql() {
+            let mut data = if op.kind.is_sql() {
                 json!({"sql":op.sql,"params":op.params})
-            } else {
+            } else if op.kind.is_lifecycle() {
                 json!({"lifecycle":op.kind.as_str()})
+            } else {
+                json!({"copy":op.id,"copy_method":op.kind.as_str()})
             };
+            if let Some(copy) = &op.copy {
+                data["copy"] = json!(copy);
+            }
             self.append(&mut s, c, &op.id, "created", data);
             match op.kind {
-                OperationKind::Sql => {}
                 OperationKind::Crash => {
                     s.phase.insert(c.clone(), Phase::Crashing);
                 }
@@ -534,13 +597,13 @@ impl Engine {
                     s.phase.insert(c.clone(), Phase::Reopening);
                     *s.generation.entry(c.clone()).or_default() += 1;
                 }
+                _ => {}
             }
-            s.generation[c]
+            (s.generation[c], copy_slot)
         };
         // Lifecycle operations are bounded by their own deadlines and report
         // terminal events like SQL, so dependencies and replay treat them alike.
         match op.kind {
-            OperationKind::Sql => {}
             OperationKind::Crash => {
                 tokio::spawn(self.clone().run_crash(op, w));
                 return Ok(());
@@ -549,6 +612,7 @@ impl Engine {
                 tokio::spawn(self.clone().run_reopen(op, generation));
                 return Ok(());
             }
+            _ => {}
         }
         // The deadline includes IPC backpressure, not only SQLite execution.
         let start = Instant::now();
@@ -567,8 +631,9 @@ impl Engine {
                 }
                 let files = e.files();
                 let size = files["db_bytes"].as_u64().unwrap_or(0)
-                    + files["wal_bytes"].as_u64().unwrap_or(0);
-                if size > 128 * 1024 * 1024 {
+                    + files["wal_bytes"].as_u64().unwrap_or(0)
+                    + files["copy_bytes"].as_u64().unwrap_or(0);
+                if size > STORAGE_LIMIT_BYTES {
                     e.state.lock().await.stopped = true;
                     e.lost(
                         &conn,
@@ -587,7 +652,12 @@ impl Engine {
                 }
             }
         });
-        if let Err(e) = send(&w, json!({"command":"execute","operation":op})).await {
+        if let Err(e) = send(
+            &w,
+            json!({"command":"execute","operation":op,"copy_slot":copy_slot}),
+        )
+        .await
+        {
             self.lost(&op.connection, None, &e).await;
             return Err(e);
         }
@@ -952,54 +1022,92 @@ impl Engine {
         .map_err(|_| "Terminal event timeout".into())
     }
     pub async fn replay(self: &Arc<Self>) -> Result<(), String> {
+        let result = self.run_schedule().await;
+        if self.scenario.format_version == FORMAT {
+            return result.map_err(|message| format!("Incomplete experiment: {message}"));
+        }
+        result
+    }
+    async fn run_schedule(self: &Arc<Self>) -> Result<(), String> {
+        let timeout = self.scenario.settings.deadline_ms + 2000;
         for op in self.scenario.operations.clone() {
             for d in &op.after {
-                self.wait_event(
-                    &d.operation,
-                    None,
-                    &d.event,
-                    self.scenario.settings.deadline_ms + 2000,
-                )
-                .await?;
+                let ev = self
+                    .wait_event(&d.operation, None, &d.event, timeout)
+                    .await?;
+                if self.scenario.format_version == FORMAT
+                    && d.event == "completed"
+                    && let Some(message) = ev.data["assertion"]["message"].as_str()
+                {
+                    return Err(message.into());
+                }
+            }
+            if let Some(copy) = &op.copy {
+                self.wait_event(copy, None, "completed", timeout)
+                    .await
+                    .map_err(|message| format!("Copy operation {copy}: {message}"))?;
             }
             self.submit(op).await?;
         }
         for op in &self.scenario.operations {
             let ev = self.wait_terminal(&op.id).await?;
-            let expected = &op.expect;
-            if let Some(code) = expected["extended"].as_i64() {
-                if ev.data["error"]["extended"].as_i64() != Some(code) {
-                    return Err(format!(
-                        "Expectation mismatch for {}: expected SQLite {code}, got {}",
-                        op.id, ev.data
-                    ));
-                }
-            } else if ev.kind != "completed" {
-                return Err(format!("Operation {} ended as {}", op.id, ev.kind));
-            }
-            if let Some(rows) = expected.get("rows")
-                && &ev.data["result"]["rows"] != rows
-            {
-                return Err(format!("Row expectation mismatch for {}", op.id));
-            }
-            if expected["full_checkpoint"] == true || expected["partial_checkpoint"] == true {
-                let (busy, log, checkpointed) = checkpoint_counts(&ev.data).ok_or_else(|| {
-                    format!("Invalid or unavailable checkpoint counts for {}", op.id)
-                })?;
-                if expected["full_checkpoint"] == true && (busy != 0 || log != checkpointed) {
-                    return Err(format!("Expected complete checkpoint for {}", op.id));
-                }
-                if expected["partial_checkpoint"] == true && log <= checkpointed {
-                    return Err(format!("Expected incomplete checkpoint for {}", op.id));
-                }
-            }
+            check_expectation(
+                op,
+                &ev.kind,
+                &ev.data,
+                self.scenario.format_version == FORMAT,
+            )?;
         }
         Ok(())
     }
 }
-fn checkpoint_counts(data: &Value) -> Option<(i64, i64, i64)> {
+fn check_expectation(op: &Operation, kind: &str, data: &Value, exact: bool) -> Result<(), String> {
+    let expected = &op.expect;
+    if let Some(code) = expected["extended"].as_i64() {
+        if data["error"]["extended"].as_i64() != Some(code) {
+            let observed = data["error"]["extended"]
+                .as_i64()
+                .map_or_else(|| kind.to_owned(), |code| format!("SQLite {code}"));
+            return Err(format!(
+                "Expectation mismatch for {}: expected SQLite {code}, got {observed}",
+                op.id
+            ));
+        }
+    } else if kind != "completed" {
+        let message = data["error"]["message"]
+            .as_str()
+            .unwrap_or("No further details");
+        return Err(format!("Operation {} ended as {kind}: {message}", op.id));
+    }
+    if expected["full_checkpoint"] == true || expected["partial_checkpoint"] == true {
+        let (busy, log, checkpointed) = checkpoint_counts(data, exact)
+            .ok_or_else(|| format!("Invalid or unavailable checkpoint counts for {}", op.id))?;
+        if expected["full_checkpoint"] == true && (busy != 0 || log != checkpointed) {
+            return Err(format!(
+                "Expected complete checkpoint for {} (busy={busy}, log={log}, checkpointed={checkpointed})",
+                op.id
+            ));
+        }
+        if expected["partial_checkpoint"] == true && log <= checkpointed {
+            return Err(format!("Expected incomplete checkpoint for {}", op.id));
+        }
+    }
+    if let Some(rows) = expected.get("rows") {
+        let result = &data["result"];
+        if exact && (result["rows_truncated"] == true || result["cell_previews"] == true) {
+            return Err(format!("Exact rows unavailable for {}", op.id));
+        }
+        if &result["rows"] != rows {
+            return Err(format!("Row expectation mismatch for {}", op.id));
+        }
+    }
+    Ok(())
+}
+fn checkpoint_counts(data: &Value, exact: bool) -> Option<(i64, i64, i64)> {
     let result = &data["result"];
-    if result["columns"] != json!(["busy", "log", "checkpointed"]) {
+    if result["columns"] != json!(["busy", "log", "checkpointed"])
+        || (exact && result["rows_truncated"] == true)
+    {
         return None;
     }
     let rows = result["rows"].as_array()?;

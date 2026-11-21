@@ -327,6 +327,91 @@ test("export, inspect without SQL, explicit rerun in fresh database", async ({
 		0,
 	);
 });
+test("WAL copies show integrity and row checks and replay from a recording", async ({
+	page,
+}) => {
+	await open(page);
+	await choose(page, "WAL · copy without the log");
+	for (const id of [
+		"journal_mode",
+		"autocheckpoint",
+		"baseline_checkpoint",
+		"begin",
+		"insert",
+		"commit",
+		"live_rows",
+		"main_before_checkpoint",
+		"snapshot",
+		"main_integrity",
+		"main_rows",
+		"snapshot_integrity",
+		"snapshot_rows",
+		"control_checkpoint",
+		"main_after_checkpoint",
+		"control_integrity",
+		"control_rows",
+	]) {
+		await next(page);
+		await observed(page, id, "completed");
+		if (id === "main_before_checkpoint") {
+			await page
+				.getByRole("combobox", { name: "Step for connection A" })
+				.selectOption("control_checkpoint");
+			await expect(
+				page.getByRole("button", { name: "Run A", exact: true }),
+			).toBeDisabled();
+			const download = page.waitForEvent("download");
+			await page
+				.getByRole("button", { name: "Export run", exact: true })
+				.click();
+			const file = (await (await download).path()) as string;
+			const partial = JSON.parse(await readFile(file, "utf8"));
+			expect(partial.scenario.operations.at(-1).id).toBe("control_rows");
+			expect(partial.events.at(-1).operation).toBe("main_before_checkpoint");
+		}
+	}
+	await expect(page.locator(".schedule-meta")).toContainText("17 / 17");
+	for (const [prefix, cells] of [
+		["main", ["integer1", "textbaseline"]],
+		["snapshot", ["integer1", "textbaseline", "integer2", "textcommitted"]],
+		["control", ["integer1", "textbaseline", "integer2", "textcommitted"]],
+	] as const) {
+		await expect(
+			(await result(page, `${prefix}_integrity`)).locator("tbody td"),
+		).toHaveText(["textok"]);
+		await expect(page.locator(".event-facts")).toContainText(
+			"Opened independently, read-only",
+		);
+		await expect(
+			(await result(page, `${prefix}_rows`)).locator("tbody td"),
+		).toHaveText([...cells]);
+	}
+	const download = page.waitForEvent("download");
+	await page.getByRole("button", { name: "Export run", exact: true }).click();
+	const file = (await (await download).path()) as string;
+	const recording = JSON.parse(await readFile(file, "utf8"));
+	expect(recording.format_version).toBe(3);
+	expect(recording.environment.sqlite_source_id).toBeTruthy();
+	expect(
+		recording.scenario.operations
+			.filter((o: { kind?: string }) => o.kind)
+			.map((o: { kind: string }) => o.kind),
+	).toEqual(["copy_main", "vacuum_into", "copy_main"]);
+	await page.locator("input[type=file]").setInputFiles(file);
+	await expect(
+		page.getByText("Historical recording · read only"),
+	).toBeVisible();
+	await page
+		.getByRole("button", { name: "Rerun in fresh DB", exact: true })
+		.click();
+	await expect(page.getByRole("status")).toContainText(
+		"All declared expectations matched",
+	);
+	await expect(
+		(await result(page, "main_rows")).locator("tbody td"),
+	).toHaveText(["integer1", "textbaseline"]);
+});
+
 test("SQL error, long SQL cancellation, busy reset, narrow layout", async ({
 	page,
 }) => {

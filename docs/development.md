@@ -83,7 +83,7 @@ The [verification guide](verification.md) describes test coverage, reports and f
 
 ## Update examples
 
-The built-in scenarios are defined in `src/scenarios.rs`, `src/scenarios/fk_rebuild.rs` and `src/scenarios/crash_reopen.rs`. After changing a scenario, export the catalog and record the affected examples with the built executable:
+The built-in scenarios are defined in `src/scenarios.rs` and `src/scenarios/`. After changing a scenario, export the catalog and record the affected examples with the built executable:
 
 ```sh
 ./target/release/txnstage scenarios examples

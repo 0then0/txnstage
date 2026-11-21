@@ -65,7 +65,7 @@ Each line is a separate step. A reads inside a transaction and keeps seeing the 
 
 - **Experiment**: one temporary database with its worker processes. Reset starts a new one.
 - **Connection**: one worker process holding one SQLite connection, named A, B or C.
-- **Step** or **operation**: one SQL statement on one connection, or a crash or reopen of that connection's process.
+- **Step** or **operation** can run SQL, crash or reopen a worker, or create a database copy inside the experiment.
 - **Schedule**: the ordered steps of an experiment. A step can wait for an event of an earlier step, for example "run after B's write has reported busy".
 - **Event**: something TxnStage observed, in the order it was observed: a step was created, started running, reported a busy callback, or ended as completed, failed, cancelled or timed out.
 - **Scenario**: a JSON file describing an experiment: starting schema, settings, steps and expected results.
@@ -73,18 +73,34 @@ Each line is a separate step. A reads inside a transaction and keeps seeing the 
 
 ## Experiment catalog
 
-Fifteen experiments are built in and are also available as files in [examples](examples/README.md):
+Sixteen experiments are built in and are also available as files in [examples](examples/README.md):
 
 - **01–06 · Snapshots, writers and checkpoints**: a stale read snapshot, two writers with and without retrying, DEFERRED compared with IMMEDIATE transactions, and a reader that keeps a PASSIVE checkpoint from finishing. A PASSIVE checkpoint can report `busy = 0` and still leave frames behind; see [checkpoint modes](https://www.sqlite.org/c3ref/wal_checkpoint_v2.html).
 - **07–12 · FK rebuild**: rebuilding a parent table can keep the parents and delete their children through `ON DELETE CASCADE`, while COMMIT and both integrity checks succeed. The [FK rebuild guide](docs/fk-rebuild-lab.md) explains the SQL, PRAGMA settings, preservation checks and the Drizzle/D1 context.
 - **13–15 · Process crash**: one connection's process is terminated and the same database is reopened. An uncommitted transaction is gone, a confirmed COMMIT remains, and a partially applied synthetic migration needs a resumable rerun. These model the abrupt end of a single process, not power loss or storage faults. See the [catalog](examples/README.md#process-crash-and-reopen).
+- **16 · WAL copy** checks which committed rows survive in a main-file copy and a SQLite snapshot. [Scenario](examples/16.scenario.json), [sample recording](examples/recordings/16.recording.json).
 
 Experiments 13–15 and the Crash and Reopen actions require release 0.3.0 or later. The [changelog](CHANGELOG.md) lists what each release contains.
+
+### A valid copy can miss a committed row
+
+Choose **WAL · copy without the log** and run the schedule. With automatic checkpointing disabled, the schedule checkpoints the schema and `(1, 'baseline')`. A then inserts `(2, 'committed')` and reports a completed COMMIT. A fresh read on B confirms both rows. The writer stays open while the runner copies the main file and takes a `VACUUM INTO` snapshot, with no intervening writes or checkpoint.
+
+Both copies return `ok` from `PRAGMA integrity_check`. The main-file copy contains just `(1, 'baseline')`. The snapshot contains both rows, as does the control copy made after SQLite reports a complete FULL checkpoint. Each check opens the selected copy independently. The exact row checks and the integrity checks are separate observations. [SQLite on copying database files](https://www.sqlite.org/howtocorrupt.html#_mispairing_database_files_and_hot_journals_).
+
+```sh
+./target/release/txnstage run examples/16.scenario.json --output wal-copy.recording.json
+./target/release/txnstage run wal-copy.recording.json --output wal-copy-replay.recording.json
+```
+
+The expected missing row counts as a successful experiment. A partial checkpoint, failed copy or unavailable check leaves an incomplete run with the observed reason. Recordings keep the executed steps, results and SQLite provenance. Replay creates fresh files.
+
+The historical TREK change switched scheduled backups from archiving the live database file to using a SQLite snapshot. This experiment covers a quiet copy without the WAL. The cause of the TREK incident and durability under power loss are outside its scope. [TREK commit e62dceb](https://github.com/liketrek/TREK/commit/e62dceb).
 
 ## Using the workbench
 
 - **Connection cards.** Each card has a SQL editor, optional typed parameters, a Run button and the last result. Ctrl+Enter or Cmd+Enter runs the statement in that card. All controls are reachable with Tab.
-- **Schedule.** Select a step to load its SQL into the matching card. You can edit it, run another connection first, or choose Custom SQL. Your actual order is recorded separately from the experiment's declared schedule.
+- **Schedule.** Select a step to load its SQL into the matching card. Scheduled steps in format version 3 wait for their dependencies and checks. Choose **Custom SQL** to run your own statement on an idle connection. The timeline records the order in which events arrived.
 - **Running.** Run sends one statement and returns immediately, so a waiting B does not stop you from committing on A. **Busy observed** appears only when SQLite actually called the busy handler, never because time passed.
 - **Crash and Reopen.** **Crash A/B/C** forcibly terminates that connection's worker process between statements. The card then shows the connection as closed and its transaction state as lost. **Reopen** starts a new worker on the same database file without rerunning the initial SQL. Both are recorded as steps and repeat on replay.
 - **Cancel, Stop, Reset.** **Cancel A/B/C** interrupts one running statement. **Stop** terminates all workers of the experiment. **Reset** creates new workers and a fresh database with the selected schema and settings.
@@ -125,7 +141,7 @@ The command line runs the same engine as the interface, with the same SQL restri
 - Up to 200 result rows are kept per statement, shown in pages of 20. BLOB previews are 128 bytes and TEXT previews 4096 bytes.
 - A statement can run for at most 30 seconds. Imported files can be at most 8 MiB.
 - One statement per step. Keeping a cursor open between steps is not supported.
-- Extension loading, file access from SQL, `ATTACH` and `VACUUM INTO` are rejected. Only a fixed list of PRAGMAs is allowed. Setting `busy_timeout`, `wal_autocheckpoint` or `journal_mode` through SQL is rejected so that instrumentation stays in place; change them in the experiment settings.
+- User SQL rejects extension loading, file access, `ATTACH` and `VACUUM INTO`. The two copy steps use paths assigned by TxnStage within its temporary directory. Only a fixed list of PRAGMAs is allowed. Assignments to `busy_timeout`, `wal_autocheckpoint` and `journal_mode` through SQL are rejected so that instrumentation stays in place.
 - The server listens only on the IPv4 loopback address, checks the Host and Origin headers and requires the launch token for every API request. No API accepts a file path.
 
 These restrictions are an application-level sandbox around the bundled SQLite, not an operating-system security boundary. [Architecture](docs/architecture.md#resources-and-local-isolation) and the [security policy](SECURITY.md) describe the model.

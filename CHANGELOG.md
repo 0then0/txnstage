@@ -4,6 +4,11 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ## [Unreleased]
 
+### Added
+
+- A WAL copy experiment for the workbench and CLI. It records a confirmed COMMIT, then checks integrity and exact rows in a main-file copy, a `VACUUM INTO` snapshot and a control copy made after a complete checkpoint.
+- Format version 3 adds `copy_main`, `vacuum_into` and read-only SQL checks on temporary copies. Recordings can rerun these steps in a fresh database. Versions 1 and 2 remain readable.
+
 ## [0.3.0] - 2026-11-11
 
 ### Fixed

@@ -12,8 +12,8 @@ export interface Settings {
 export interface Operation {
 	id: string;
 	connection: string;
-	// Absent for SQL steps. Lifecycle steps carry no SQL, parameters or expectation.
-	kind?: "sql" | "crash" | "reopen";
+	kind?: "sql" | Lifecycle | CopyMethod;
+	copy?: string;
 	sql: string;
 	params: Cell[];
 	after: { operation: string; event: string }[];
@@ -53,6 +53,11 @@ export interface Event {
 		transaction?: string;
 		busy_calls?: number;
 		duration_ms?: number;
+		copy?: string;
+		copy_method?: CopyMethod;
+		copy_opened?: boolean;
+		copy_bytes?: number;
+		assertion?: { matched: boolean; message?: string };
 		[key: string]: unknown;
 	};
 }
@@ -76,13 +81,26 @@ export interface Snapshot {
 	files: { db_bytes: number; wal_bytes: number; elapsed_ms: number };
 }
 export type Lifecycle = "crash" | "reopen";
+export type CopyMethod = "copy_main" | "vacuum_into";
 export type Phase = "open" | "crashing" | "closed" | "reopening";
+export const isSqlStep = (op: Operation) => !op.kind || op.kind === "sql";
+export const isCopyStep = (op: Operation) =>
+	op.kind === "copy_main" || op.kind === "vacuum_into";
 export const lifecycleOf = (op: Pick<Operation, "kind">): Lifecycle | null =>
 	op.kind === "crash" || op.kind === "reopen" ? op.kind : null;
 export function stepLabel(op: Operation): string {
-	const kind = lifecycleOf(op);
-	if (kind === "crash") return "crash worker process";
-	return kind === "reopen" ? "reopen same database" : op.sql;
+	switch (op.kind) {
+		case "crash":
+			return "crash worker process";
+		case "reopen":
+			return "reopen same database";
+		case "copy_main":
+			return "copy main database file";
+		case "vacuum_into":
+			return "create VACUUM INTO snapshot";
+		default:
+			return op.copy ? `${op.sql} · copy ${op.copy}` : op.sql;
+	}
 }
 export function eventLabel(e: Event): string {
 	if (e.kind === "busy") return "busy observed";
@@ -124,8 +142,17 @@ export function cellText(cell: Cell): string {
 	return String(cell.value);
 }
 export function ready(op: Operation, events: Event[]) {
-	return op.after.every((d) =>
-		events.some((e) => e.operation === d.operation && e.kind === d.event),
+	return (
+		(!op.copy ||
+			events.some((e) => e.operation === op.copy && e.kind === "completed")) &&
+		op.after.every((d) =>
+			events.some(
+				(e) =>
+					e.operation === d.operation &&
+					e.kind === d.event &&
+					(d.event !== "completed" || e.data.assertion?.matched !== false),
+			),
+		)
 	);
 }
 export function parseParams(text: string): Cell[] {

@@ -18,7 +18,7 @@ The coordinator is the single process you start. For each experiment it creates 
 ## Source layout
 
 - [`model.rs`](../src/model.rs) defines the versioned scenario and recording formats and validates imported data.
-- [`scenarios.rs`](../src/scenarios.rs), [`scenarios/fk_rebuild.rs`](../src/scenarios/fk_rebuild.rs) and [`scenarios/crash_reopen.rs`](../src/scenarios/crash_reopen.rs) define the [built-in experiments](../examples/README.md).
+- [`scenarios.rs`](../src/scenarios.rs) and [`scenarios/`](../src/scenarios/) define the [built-in experiments](../examples/README.md).
 - [`engine.rs`](../src/engine.rs) is the coordinator: worker processes, operation scheduling, event order, cancellation and cleanup. Each connection accepts one operation at a time.
 - [`worker.rs`](../src/worker.rs) executes SQL through its own SQLite connection and reports results.
 - [`server.rs`](../src/server.rs) exposes the loopback HTTP API. [`main.rs`](../src/main.rs) provides the CLI commands.
@@ -93,6 +93,14 @@ Cancellation can race with statement completion, so terminal data keeps the work
 
 Stop and Reset cancel active work, kill and reap every owned worker, and remove the owned directory. Ctrl+C performs the same cleanup. If the coordinator itself is killed in a way it cannot catch, a temporary directory can remain; workers still terminate on end of input. Cleanup is limited to directories owned by the running experiment. Closing the browser tab leaves the server running.
 
+## Database copies
+
+The coordinator assigns a numbered slot inside the experiment directory to each copy step. Worker commands carry the slot number. SQL probes refer to a completed copy operation by ID. They open the resulting file on a separate read-only connection for each statement and use the same authorizer as the working database.
+
+`copy_main` reads the bytes of the main file through the worker connection's existing SQLite VFS handle. This avoids opening a second descriptor to the same file in that process, which could disrupt POSIX locks. The WAL copy scenario orders writes and checkpoints away from this copy step. [SQLite on file descriptors and POSIX locks](https://www.sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_).
+
+`vacuum_into` uses a separate read-only source connection and a fixed `VACUUM INTO` statement with a bound destination. The authorizer permits SQLite's internal attach to that destination during this step. Both copy steps use the worker's cancellation and deadline protocol. Stop and Reset remove all copy slots along with the working database.
+
 ## Process crash and reopen
 
 A `crash` step models the abrupt end of one process that had a connection open. It does not model power loss, a coordinator failure or storage faults, and it happens only between statements: the coordinator rejects it while the connection has an operation without a terminal event. A kill during a statement, including during COMMIT, remains the unplanned path above.
@@ -114,14 +122,14 @@ Cancelling a connection has no effect on a crash in flight, which is already bou
 
 ### SQL restrictions
 
-The authorizer denies ATTACH and DETACH (including the attachment that `VACUUM INTO` performs), extension and file functions, and PRAGMAs outside the allowlist. No user-defined functions or shell commands are installed.
+For user SQL, the authorizer denies ATTACH and DETACH (including the attachment that `VACUUM INTO` performs), extension and file functions, and PRAGMAs outside the allowlist. No user-defined functions or shell commands are installed.
 
 ### Resource limits
 
 - SQLite temporary storage is memory only.
 - Each worker has a 64 MiB SQLite heap hard limit, a 1 MiB value limit, 64 KiB of SQL, 100 columns and no attached databases.
 - `max_page_count=16384` at the fixed default 4096-byte page size limits the database to about 64 MiB.
-- A watchdog stops workers if the observed database plus WAL size exceeds 128 MiB. This is a sampled guard with possible overshoot, not a filesystem quota.
+- A watchdog stops workers if the observed database, WAL and copies exceed 128 MiB in total. Copy creation also checks the total before reporting success and discards the new copy if it exceeds the limit.
 - One result keeps at most 200 rows and roughly 512 KiB of previews, then drops further previews while still draining the statement. The final row can exceed that soft budget by at most the column and cell preview limits.
 - The event store has a 5 MiB soft budget. When necessary, row previews are omitted with an explicit `recording_limit` marker.
 - New submissions stop at that budget, at 512 KiB of submitted operation descriptions (including initialization), at 200 user operations, or at the event count limit. Terminal events of operations that are already active are still recorded.

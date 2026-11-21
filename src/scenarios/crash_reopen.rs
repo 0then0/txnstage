@@ -36,7 +36,7 @@ fn lifecycle(
 }
 fn ledger(name: &str, description: &str) -> Scenario {
     let mut s = base(name, description);
-    s.format_version = FORMAT;
+    s.format_version = FORMAT_LIFECYCLE;
     s.settings.connections = 2;
     s.initial = vec![
         "CREATE TABLE account(id INTEGER PRIMARY KEY, balance INTEGER NOT NULL)".into(),
@@ -243,7 +243,7 @@ fn migration() -> Scenario {
         "Process crash · partial migration",
         "A synthetic application contract: migration 2 creates a contact table, copies every customer email into it and records version 2. The application commits the CREATE separately, then the process is terminated during the copy. After reopen the table exists but is empty and version 2 is not recorded. A naive rerun stops at the existing table; a prepared resumable rerun completes and is checked independently. This is not an ORM migration runner and not a SQLite defect. https://www.sqlite.org/lang_transaction.html",
     );
-    s.format_version = FORMAT;
+    s.format_version = FORMAT_LIFECYCLE;
     s.settings.connections = 2;
     s.initial = vec![
         "CREATE TABLE customer(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL)".into(),

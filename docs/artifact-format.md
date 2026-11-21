@@ -3,9 +3,9 @@
 TxnStage saves experiments in two kinds of JSON file:
 
 - A **scenario** defines the starting database, connection settings, SQL operations, event dependencies and expected results.
-- A **recording** contains the executed scenario, its SQLite environment and observed events. It can be inspected or rerun in a fresh database.
+- A **recording** contains a replayable scenario, its SQLite environment and observed events. It can be inspected or rerun in a fresh database.
 
-Two format versions are read. Version 1 contains SQL steps only. Version 2 adds the typed `crash` and `reopen` steps described under [Process crash and reopen steps](#process-crash-and-reopen-steps); everything else is identical. TxnStage raises the version to 2 only when a run contains such a step. Version 1 scenarios and their recordings therefore stay version 1 and remain readable by releases that know only version 1. A version 1 file containing a `kind` field is rejected. A recording has the same version as the scenario inside it.
+Version 1 contains SQL steps. Version 2 adds [process crash and reopen steps](#process-crash-and-reopen-steps). Version 3 adds [temporary database copy steps and checks](#database-copy-steps). TxnStage reads all three versions and raises the version of an exported run when one of its steps requires a newer format. A recording has the same version as the scenario inside it.
 
 Import validates and displays a file without executing SQL; execution requires **Rerun in fresh DB** or the CLI `run` command. Files are limited to 8 MiB. Unknown scenario, operation, settings and recording envelope fields and unknown versions are rejected. Event data allows additional fields, while its envelopes, result shapes and sequence numbers are validated.
 
@@ -29,7 +29,9 @@ Each initial entry is one statement. Operations have unique 1–80 character ASC
 
 Expectations support exact typed `rows`, an `extended` SQLite code, `partial_checkpoint: true`, and `full_checkpoint: true`. Checkpoint expectations require exactly one row with integer busy/log/checkpointed columns, a busy flag of 0 or 1, and nonnegative counts with checkpointed <= log. Unavailable (-1) or missing counts are rejected. Full requires busy=0 and equal counts; partial requires log > checkpointed; the TRUNCATE experiment also expects `[0,0,0]`. Null expectation means successful completion is required. An expected error never changes the recorded SQL error's category or lifecycle.
 
-SQL completion and expectation matching are separate results. A SELECT can complete successfully while its rows fail an expectation; conversely, an expected SQLite error can satisfy a scenario. The [FK preservation example](fk-rebuild-lab.md#observation-and-preservation) demonstrates this distinction.
+SQL completion and expectation matching are separate results. A SELECT can complete successfully while its rows fail an expectation. An expected SQLite error can satisfy a scenario. The [FK preservation example](fk-rebuild-lab.md#observation-and-preservation) demonstrates this distinction.
+
+Version 3 records the outcome of each explicit expectation in the terminal event. A version 3 dependency on `completed` also requires any expectation on that step to pass before the schedule proceeds. A checkpoint can therefore report `completed` at the SQL level and still block a copy when it left frames behind.
 
 Parameters and result cells have these representations:
 
@@ -56,19 +58,39 @@ A version 2 scenario can end one connection's worker process abruptly and then o
 ]
 ```
 
-`kind` is `sql` (the default, omitted on export), `crash` or `reopen`. Lifecycle steps take no `sql`, `params` or `expect`; assert the outcome with a following SQL step and its ordinary expectation. They report `created`, `running` and a terminal event like SQL steps, so other steps depend on them through `after` in the usual way.
+`kind` defaults to `sql`, which is omitted on export. The `crash` and `reopen` steps take no `sql`, `params` or `expect`. Assert the outcome with a following SQL step and its ordinary expectation. They report `created`, `running` and a terminal event like SQL steps, so other steps depend on them through `after` in the usual way.
 
 - `crash` forcibly terminates the worker process of that connection and waits until the process has exited and been reaped. The step then ends as `completed` and the connection is closed. Other connections and all database files are untouched.
 - `reopen` starts a new worker for the same connection ID on the same database file and waits for it to report ready. Initialization SQL is not rerun and no file is removed or recreated.
 
 Validation follows the array order, which is the submission order. A lifecycle step must list a terminal event of the previous step on its connection in `after`, and so must the step that follows a lifecycle step on that connection. A scenario is rejected if it runs SQL on a closed connection, crashes a closed connection or reopens an open one. A recorded `reopen` that ended as failed, cancelled or timed_out leaves the connection closed, so a later retry remains valid.
 
+## Database copy steps
+
+Version 3 supports two creation steps. They take an operation ID, connection, dependencies and note.
+
+- `copy_main` copies the bytes of the working database's main file into its own directory.
+- `vacuum_into` takes a snapshot of the working database with SQLite's `VACUUM INTO`.
+
+Each copy lives inside the current experiment's temporary directory. An SQL step can set `copy` to the ID of an earlier creation step. The copy must have completed successfully. The worker opens it on a fresh read-only connection for that statement and applies the usual SQL restrictions. An ordinary SQL step with no `copy` field still uses its connection to the working database.
+
+```json
+[
+  {"id":"snapshot","connection":"A","kind":"vacuum_into"},
+  {"id":"check","connection":"B","copy":"snapshot","sql":"PRAGMA integrity_check",
+   "after":[{"operation":"snapshot","event":"completed"}],
+   "expect":{"rows":[[{"type":"text","value":"ok"}]]}}
+]
+```
+
+The copy reference is a logical ID. TxnStage assigns a fresh destination on each run. See [scenario 16](../examples/16.scenario.json) for the checkpoint barriers, integrity checks and separate exact row checks.
+
 ## Recorded run
 
 Use **Export run** or `txnstage run --output` to create a recording. Its top-level fields are:
 
-- `format_version`: the recording format version, currently `1`.
-- `scenario`: the operations actually submitted, with their settings and initialization SQL.
+- `format_version` is the version of the recorded scenario.
+- `scenario` contains the steps to replay, connection settings and initialization SQL.
 - `environment`: SQLite version, source ID, compile options, TxnStage version, operating system, architecture, settings and busy policy.
 - `events`: observations in sequence order. Each event has `seq`, `elapsed_ms`, `connection`, `operation`, `kind` and `data`.
 
@@ -78,11 +100,15 @@ The [sample recordings](../examples/recordings/) are complete importable example
 
 Events of a lifecycle step carry `lifecycle: "crash"` or `"reopen"` and the worker `generation`, which starts at 1 for each connection and increases with every reopen attempt. `ready` events carry the generation of the process that reported them. A completed crash records `planned: true`, the terminated `pid`, `termination` (`method`, `cooperative_cleanup: false`, `exit_confirmed`, `reaped`, `exit_status`) and `session_state` with the transaction state last sampled before the crash. The method is `SIGKILL` on Unix and `TerminateProcess` on Windows. A completed reopen records the new `generation` and `pid`, the sampled `transaction` and `autocommit` of the new connection, and text describing what was kept and reapplied. A failed reopen has an infrastructure error and `connection: "closed"`. The scenario holds only the replayable intent: step kind, connection and dependencies. Process IDs, exit status, timestamps, durations and file sizes stay in events and are never compared on replay.
 
-Exported run scenarios contain the operations actually submitted. Their dependencies are reconstructed from the latest confirmed terminal, busy or running event of the most recent earlier operation on each connection at each submission boundary. This captures observed user ordering without inventing sleeps or inferring internal lock states. Concurrent requests with no confirmed prior event retain a weaker order. Busy barriers can have different retry counts on replay. The executable template can separately retain steps not yet run through Export scenario.
+Copy creation events identify the method and the copy ID. Successful creation records `copy_bytes`. SQL probes record that ID and whether the read-only open succeeded in `copy_opened`. Readings and errors use the standard result format. Version 3 terminal events for steps with expectations include `assertion.matched` and a message if the check failed.
+
+Run exports normally contain the submitted operations. Their dependencies are reconstructed from the latest confirmed terminal, busy or running event of the most recent earlier operation on each connection at each submission boundary. This captures observed user ordering without inventing sleeps or inferring internal lock states. Concurrent requests with no confirmed prior event retain a weaker order. Busy barriers can have different retry counts on replay.
+
+When a version 3 run follows the declared schedule and stops early, the recording keeps the remaining steps for a fresh replay. Steps that were never submitted have no events. Use Export scenario to save an editable schedule without the observations.
 
 A recording may be incomplete or cancelled. It is still viewable; rerunning can fail its successful-completion expectations. Cancel actions are recorded events rather than executable operations, so repeating cancellation requires an explicit user action. Fresh reruns use a new database file and new workers. Crash and reopen are executable steps, unlike cancellation: a rerun terminates and restarts the worker at the same logical points.
 
-Recordings store SQL events and declared expectations without a separate overall assertion result. A historical `completed` event means that the SQL statement completed; it does not establish that its expectation matched. Rerun the scenario to evaluate its expectations against a fresh execution.
+Recordings store observations for individual steps. For version 1 and 2 recordings, `completed` refers to execution and the expectation can be evaluated by rerunning. Version 3 stores individual check outcomes alongside the observed data. Replay evaluates the expectations against fresh execution.
 
 The viewer compares recorded SQLite version, source ID, application version, OS and architecture. The headless CLI prints platform/SQLite differences to stderr before replay. Compile options and settings remain available for inspection. Differences are informational; execution remains explicit and never promises identical observations.
 
