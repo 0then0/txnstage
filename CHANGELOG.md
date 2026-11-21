@@ -4,6 +4,8 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Added
 
 - A WAL copy experiment for the workbench and CLI. It records a confirmed COMMIT, then checks integrity and exact rows in a main-file copy, a `VACUUM INTO` snapshot and a control copy made after a complete checkpoint.
@@ -78,7 +80,8 @@ User-visible changes are grouped by release. Versions link to the published rele
 - Typed results, event timelines, cancellation, scenario export and recording import/replay.
 - Standalone Linux x86_64, macOS ARM64 and Windows x86_64 archives with bundled SQLite 3.53.2.
 
-[Unreleased]: https://github.com/0then0/txnstage/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/0then0/txnstage/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/0then0/txnstage/releases/tag/v0.4.0
 [0.3.0]: https://github.com/0then0/txnstage/releases/tag/v0.3.0
 [0.2.0]: https://github.com/0then0/txnstage/releases/tag/v0.2.0
 [0.1.1]: https://github.com/0then0/txnstage/releases/tag/v0.1.1
