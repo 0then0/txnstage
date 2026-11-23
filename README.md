@@ -2,7 +2,7 @@
 
 # TxnStage
 
-[![Version](https://img.shields.io/badge/version-0.4.0-344b38)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.4.1-344b38)](Cargo.toml)
 [![SQLite](https://img.shields.io/badge/SQLite-3.54.1_bundled-536b8b)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-8e602d)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/0then0/txnstage/ci.yml?label=CI)](https://github.com/0then0/txnstage/actions/workflows/ci.yml)
