@@ -4,6 +4,10 @@ User-visible changes are grouped by release. Versions link to the published rele
 
 ## [Unreleased]
 
+### Added
+
+- A [SQLAlchemy savepoint example](examples/README.md#sqlalchemy-savepoints-in-sqlite) with a Python driver trace and two workbench recordings showing when an insert survives an outer rollback.
+
 ## [0.4.0] - 2026-11-21
 
 ### Added

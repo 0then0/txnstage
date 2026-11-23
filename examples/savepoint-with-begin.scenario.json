@@ -1,0 +1,63 @@
+{
+  "format_version": 1,
+  "name": "SQLite savepoint with outer BEGIN",
+  "description": "SQL from the SQLAlchemy explicit-BEGIN control. Releasing a nested savepoint leaves the outer transaction open, so the rollback removes the session row.",
+  "settings": {
+    "journal_mode": "delete",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 2
+  },
+  "initial": [
+    "CREATE TABLE entries (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+    "INSERT INTO entries (id, label) VALUES (1, 'baseline')"
+  ],
+  "operations": [
+    {
+      "id": "a_begin",
+      "connection": "A",
+      "sql": "BEGIN",
+      "after": [],
+      "note": "Open the outer transaction before creating the savepoint."
+    },
+    {
+      "id": "a_savepoint",
+      "connection": "A",
+      "sql": "SAVEPOINT sa_savepoint_1",
+      "after": [{"operation": "a_begin", "event": "completed"}],
+      "note": "The savepoint is nested inside the outer transaction."
+    },
+    {
+      "id": "a_insert",
+      "connection": "A",
+      "sql": "INSERT INTO entries (id, label) VALUES (2, 'session')",
+      "after": [{"operation": "a_savepoint", "event": "completed"}],
+      "note": "Insert the session row inside the savepoint."
+    },
+    {
+      "id": "a_release",
+      "connection": "A",
+      "sql": "RELEASE SAVEPOINT sa_savepoint_1",
+      "after": [{"operation": "a_insert", "event": "completed"}],
+      "note": "Releasing the nested savepoint leaves the write transaction open and autocommit off."
+    },
+    {
+      "id": "a_rollback",
+      "connection": "A",
+      "sql": "ROLLBACK",
+      "after": [{"operation": "a_release", "event": "completed"}],
+      "note": "Roll back the outer transaction, including the insert from the released savepoint."
+    },
+    {
+      "id": "b_read",
+      "connection": "B",
+      "sql": "SELECT id, label FROM entries ORDER BY id",
+      "after": [{"operation": "a_rollback", "event": "completed"}],
+      "expect": {"rows": [
+        [{"type": "integer", "value": "1"}, {"type": "text", "value": "baseline"}]
+      ]},
+      "note": "B's first read sees the original row after the rollback."
+    }
+  ]
+}

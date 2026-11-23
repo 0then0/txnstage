@@ -1,0 +1,23 @@
+Python 3.12.16 | SQLAlchemy 2.1.6 | SQLite 3.53.1
+
+[legacy]
+sqlite3.autocommit=LEGACY_TRANSACTION_CONTROL, isolation_level=''
+Initial connection | SQLAlchemy.in_transaction=False | sqlite3.in_transaction=False | SQL=[]
+Connection.begin() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=False | SQL=[]
+Session.connection() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=['SAVEPOINT sa_savepoint_1']
+Session.execute() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=["INSERT INTO entries (id, label) VALUES (2, 'session')"]
+Session.commit() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=False | SQL=['RELEASE SAVEPOINT sa_savepoint_1']
+Session.close() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=False | SQL=[]
+Outer rollback() | SQLAlchemy.in_transaction=False | sqlite3.in_transaction=False | SQL=[]
+New connection | sqlite3.in_transaction=False | SQL=['SELECT id, label FROM entries ORDER BY id'] | rows=[(1, 'baseline'), (2, 'session')]
+
+[explicit-begin]
+sqlite3.autocommit=LEGACY_TRANSACTION_CONTROL, isolation_level=None
+Initial connection | SQLAlchemy.in_transaction=False | sqlite3.in_transaction=False | SQL=[]
+Connection.begin() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=['BEGIN']
+Session.connection() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=['SAVEPOINT sa_savepoint_1']
+Session.execute() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=["INSERT INTO entries (id, label) VALUES (2, 'session')"]
+Session.commit() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=['RELEASE SAVEPOINT sa_savepoint_1']
+Session.close() | SQLAlchemy.in_transaction=True | sqlite3.in_transaction=True | SQL=[]
+Outer rollback() | SQLAlchemy.in_transaction=False | sqlite3.in_transaction=False | SQL=['ROLLBACK']
+New connection | sqlite3.in_transaction=False | SQL=['SELECT id, label FROM entries ORDER BY id'] | rows=[(1, 'baseline')]

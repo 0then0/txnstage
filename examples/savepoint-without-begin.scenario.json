@@ -1,0 +1,50 @@
+{
+  "format_version": 1,
+  "name": "SQLite savepoint without outer BEGIN",
+  "description": "SQL from the SQLAlchemy legacy-mode case. Releasing the outermost savepoint commits the insert. B independently reads the committed rows.",
+  "settings": {
+    "journal_mode": "delete",
+    "busy_ms": 2000,
+    "deadline_ms": 5000,
+    "row_limit": 100,
+    "connections": 2
+  },
+  "initial": [
+    "CREATE TABLE entries (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+    "INSERT INTO entries (id, label) VALUES (1, 'baseline')"
+  ],
+  "operations": [
+    {
+      "id": "a_savepoint",
+      "connection": "A",
+      "sql": "SAVEPOINT sa_savepoint_1",
+      "after": [],
+      "note": "The savepoint starts the SQLite transaction. Check autocommit in the completed event."
+    },
+    {
+      "id": "a_insert",
+      "connection": "A",
+      "sql": "INSERT INTO entries (id, label) VALUES (2, 'session')",
+      "after": [{"operation": "a_savepoint", "event": "completed"}],
+      "note": "Insert the session row inside the savepoint."
+    },
+    {
+      "id": "a_release",
+      "connection": "A",
+      "sql": "RELEASE SAVEPOINT sa_savepoint_1",
+      "after": [{"operation": "a_insert", "event": "completed"}],
+      "note": "Releasing the outermost savepoint commits the insert and turns autocommit on."
+    },
+    {
+      "id": "b_read",
+      "connection": "B",
+      "sql": "SELECT id, label FROM entries ORDER BY id",
+      "after": [{"operation": "a_release", "event": "completed"}],
+      "expect": {"rows": [
+        [{"type": "integer", "value": "1"}, {"type": "text", "value": "baseline"}],
+        [{"type": "integer", "value": "2"}, {"type": "text", "value": "session"}]
+      ]},
+      "note": "B's first read sees both rows. The Python rollback call emitted no SQL."
+    }
+  ]
+}

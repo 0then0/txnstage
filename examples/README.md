@@ -1,6 +1,6 @@
 # Experiment catalog
 
-These scenarios are available in the workbench's **Experiments** list and as portable JSON files. Each defines a starting schema, connection settings, SQL operations, event dependencies and expected results. Every run uses a fresh database owned by TxnStage.
+Use the workbench's **Experiments** list for the numbered built-ins and **Import** for any scenario file in this catalog. Each scenario defines a starting schema, connection settings, SQL operations, event dependencies and expected results. Every TxnStage run uses a fresh database owned by TxnStage.
 
 ## Snapshots, writers and checkpoints
 
@@ -36,6 +36,30 @@ Outcomes are established by queries after reopen. WAL and journal file sizes in 
 
 [16 · Copy without the log](16.scenario.json) compares the rows in a main-file copy and a `VACUUM INTO` snapshot from the same committed state. Both pass `integrity_check`. The main-file copy misses the row still in the WAL. A final copy after a confirmed FULL checkpoint preserves both rows. See the [walkthrough](../README.md#a-valid-copy-can-miss-a-committed-row) and [sample recording](recordings/16.recording.json).
 
+## SQLAlchemy savepoints in SQLite
+
+Run the harness from the repository root in a Python 3.12 or later environment with `SQLAlchemy==2.1.6` installed. [Python harness](sqlalchemy-savepoint.py)
+
+```sh
+python examples/sqlalchemy-savepoint.py
+```
+
+Both cases start with `(1, 'baseline')` committed in a fresh temporary SQLite file. The two writer connections explicitly select `sqlite3.LEGACY_TRANSACTION_CONTROL`. The control sets `isolation_level=None` and uses the SQLAlchemy `begin` event to emit `BEGIN`. Both cases bind a session with `join_transaction_mode="create_savepoint"`, insert `(2, 'session')`, commit and close the session, then call the outer transaction's `rollback()`. A new connection reads the rows while the writer is still open. [SQLAlchemy SQLite documentation](https://docs.sqlalchemy.org/en/20/dialects/sqlite.html#legacy-transaction-mode-with-the-sqlite3-driver), [Python sqlite3 documentation](https://docs.python.org/3/library/sqlite3.html#transaction-control)
+
+In the capture (Python 3.12.16, SQLAlchemy 2.1.6, SQLite 3.53.1), `Connection.begin()` marked the SQLAlchemy transaction active in both cases. In the legacy case it emitted no `BEGIN`. `Session.commit()` released the outermost savepoint, committed the insert and ended the SQLite transaction. The outer `rollback()` emitted no SQL, so both rows survived. In the control, the hook emitted `BEGIN` before `SAVEPOINT`. `RELEASE` left the SQLite transaction active, and the emitted `ROLLBACK` left only `(1, 'baseline')`. [Captured driver SQL and transaction states](sqlalchemy-savepoint.txt)
+
+Open a scenario or recording with **Import** in the workbench, then select **Rerun in fresh DB**. You can also run the scenarios with the CLI. The recordings use TxnStage 0.4.0 with bundled SQLite 3.54.1 in DELETE journal mode.
+
+- [Without outer BEGIN](savepoint-without-begin.scenario.json) · [Recording](recordings/savepoint-without-begin.recording.json)
+- [With outer BEGIN](savepoint-with-begin.scenario.json) · [Recording](recordings/savepoint-with-begin.recording.json)
+
+```sh
+./target/release/txnstage run examples/savepoint-without-begin.scenario.json --output without-begin.recording.json
+./target/release/txnstage run examples/savepoint-with-begin.scenario.json --output with-begin.recording.json
+```
+
+In completed events, **Autocommit** is the inverse of Python's `sqlite3.in_transaction`. A deferred `BEGIN` or an empty savepoint can show **Transaction** as `none` with **Autocommit** off. Compare the `RELEASE` events, then inspect B's first read for the exact committed rows. [Trace fields](../docs/architecture.md#observation-and-interpretation)
+
 ## Run a scenario
 
 From the repository root, using a built executable:
@@ -56,7 +80,7 @@ The separate [preservation assertion example](fk-preservation-fails.scenario.jso
 
 ## Inspect and replay recordings
 
-The [recordings directory](recordings/) contains captured executions of all sixteen scenarios and the preservation assertion example. Open a scenario or recording with **Import** in the workbench. Import displays the file without executing SQL; **Rerun in fresh DB** starts an explicit fresh execution.
+The [recordings directory](recordings/) contains captures of all sixteen built-ins and the additional SQL scenarios. Open a scenario or recording with **Import** in the workbench. Import displays the file without executing SQL; **Rerun in fresh DB** starts an explicit fresh execution.
 
 To replay a supplied recording from the command line:
 
